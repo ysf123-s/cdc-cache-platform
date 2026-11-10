@@ -1,0 +1,161 @@
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: canal-demo-mysql
+    restart: unless-stopped
+    mem_limit: 512m
+    memswap_limit: 1024m
+    command:
+      - --default-authentication-plugin=mysql_native_password
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root}
+      MYSQL_DATABASE: ${MYSQL_DB:-demo_db}
+      MYSQL_USER: ${MYSQL_USER:-demo}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-demo}
+      TZ: Asia/Shanghai
+    ports:
+      - "127.0.0.1:${MYSQL_PORT:-3306}:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ./docker/mysql/my.cnf:/etc/mysql/conf.d/canal.cnf:ro
+      - ./deploy/mysql-small-memory.cnf:/etc/mysql/conf.d/cdc-memory.cnf:ro
+      - ./docker/mysql/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-p${MYSQL_ROOT_PASSWORD:-root}"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+  redis:
+    image: redis:7.2-alpine
+    container_name: canal-demo-redis
+    restart: unless-stopped
+    # lazyfree-lazy-user-del 与项目统一使用 DEL 的删除方式配合，降低大 key 删除阻塞
+    command: ["redis-server", "--appendonly", "yes", "--lazyfree-lazy-user-del", "yes"]
+    ports:
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  kafka:
+    image: apache/kafka:3.7.2
+    container_name: canal-demo-kafka
+    restart: unless-stopped
+    mem_limit: 640m
+    memswap_limit: 640m
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,PLAINTEXT_HOST://:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:${KAFKA_HOST_PORT:-29092}
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_NUM_PARTITIONS: 6
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 1
+      KAFKA_LOG_RETENTION_HOURS: 168
+      KAFKA_HEAP_OPTS: "-Xmx384m -Xms128m"
+      KAFKA_LOG_CLEANER_DEDUPE_BUFFER_SIZE: 16777216
+      TZ: Asia/Shanghai
+    ports:
+      - "127.0.0.1:${KAFKA_HOST_PORT:-29092}:29092"
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 20
+      start_period: 30s
+
+  # 显式创建 6 分区 topic，避免依赖自动创建时分区数与 partition-count 不一致
+  kafka-init:
+    image: apache/kafka:3.7.2
+    container_name: canal-demo-kafka-init
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 \
+          --create --if-not-exists --topic example \
+          --partitions 6 --replication-factor 1
+    restart: "no"
+
+  canal:
+    image: canal/canal-server:v1.1.8
+    container_name: canal-demo-canal
+    restart: unless-stopped
+    mem_limit: 512m
+    memswap_limit: 512m
+    depends_on:
+      mysql:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+    environment:
+      TZ: Asia/Shanghai
+      JAVA_OPTS: "-Xms128m -Xmx384m -Xmn64m -XX:SurvivorRatio=2 -XX:+UseG1GC"
+    ports:
+      - "127.0.0.1:11111:11111"
+      - "127.0.0.1:11112:11112"
+    volumes:
+      - ./docker/canal/canal.properties:/home/admin/canal-server/conf/canal.properties:ro
+      - ./docker/canal/example/instance.properties:/home/admin/canal-server/conf/example/instance.properties:ro
+      - canal-logs:/home/admin/canal-server/logs
+
+  # 可选：把应用也放进同一条 compose 里启动
+  # 用法：docker compose --profile app up -d --build
+  app:
+    profiles: ["app"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: canal-demo-app
+    restart: unless-stopped
+    mem_limit: 512m
+    memswap_limit: 576m
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      canal:
+        condition: service_started
+    environment:
+      MYSQL_HOST: mysql
+      JAVA_TOOL_OPTIONS: "-Xms64m -Xmx192m"
+      MYSQL_PORT: "3306"
+      MYSQL_DB: ${MYSQL_DB:-demo_db}
+      MYSQL_USER: ${MYSQL_USER:-demo}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-demo}
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_DB: "0"
+      KAFKA_BOOTSTRAP: kafka:9092
+      PLATFORM_ENABLED: ${PLATFORM_ENABLED:-true}
+      PLATFORM_MYSQL_USER: ${PLATFORM_MYSQL_USER:-demo}
+      PLATFORM_MYSQL_PASSWORD: ${PLATFORM_MYSQL_PASSWORD:-demo}
+    ports:
+      - "127.0.0.1:8081:8081"
+
+volumes:
+  mysql-data:
+  redis-data:
+  kafka-data:
+  canal-logs:

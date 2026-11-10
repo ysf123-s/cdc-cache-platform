@@ -1,0 +1,11 @@
+# 现有 2 GB ECS 的 MySQL 内存配置；保留当前语句及每线程语句历史。
+[mysqld]
+performance_schema_accounts_size=0
+performance_schema_hosts_size=0
+performance_schema_users_size=0
+performance_schema_digests_size=1000
+performance_schema_events_statements_history_long_size=0
+performance_schema_events_stages_history_long_size=0
+performance_schema_events_waits_history_long_size=0
+performance_schema_events_transactions_history_long_size=0
+innodb_log_buffer_size=16777216

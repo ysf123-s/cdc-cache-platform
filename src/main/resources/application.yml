@@ -1,0 +1,96 @@
+server:
+  port: 8081
+
+spring:
+  profiles:
+    default: local
+  application:
+    name: canal-cache-sync-mq
+
+  datasource:
+    url: jdbc:mysql://${MYSQL_HOST:127.0.0.1}:${MYSQL_PORT:3306}/${MYSQL_DB:demo_db}?useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true
+    username: ${MYSQL_USER:root}
+    password: ${MYSQL_PASSWORD:}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    hikari:
+      # 定期检查空闲连接，让失效连接尽早退出连接池。
+      keepalive-time: 60000
+      validation-timeout: 1000
+
+  data:
+    redis:
+      # Redis 服务端建议开启：
+      # lazyfree-lazy-user-del yes
+      # 说明：
+      # 1. 这是 Redis 自身的配置，不是 Spring Boot 客户端配置项
+      # 2. 当前项目删除缓存统一使用 DEL
+      # 3. 开启后，Redis 会按释放成本决定是否走 lazy free 路径，降低大 key 删除阻塞
+      host: ${REDIS_HOST:127.0.0.1}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD:}
+      database: ${REDIS_DB:0}
+      timeout: 5s
+      lettuce:
+        pool:
+          max-active: 8
+          max-idle: 4
+          min-idle: 1
+
+canal:
+  destination: example
+  # 数据源代数。单主库连续 binlog 场景保持 0；主从切换、重建或 RESET MASTER 后递增并重启消费者。
+  source-epoch: 0
+  mq:
+    kafka:
+      servers: ${KAFKA_BOOTSTRAP:127.0.0.1:9092}
+      topic: example
+      group-id: canal-cache-sync-mq
+      # 本实例启动的 Kafka consumer 线程数，通常不超过 Kafka topic 分区数。
+      partition-count: 6
+      # 分区路由在 Canal Server 侧配置，例如：
+      # canal.mq.partitionsNum=6
+      # canal.mq.partitionHash=demo_db\\..*:$pk$
+      # 注意：
+      # 1. 参与缓存同步的表建议都有主键，$pk$ 会自动使用表主键做 Hash 分区
+      # 2. 如果某张表的 Redis key 不是由主键组成，要在通配规则前单独配置，如 demo_db.user_email:email,demo_db\\..*:$pk$
+      batch-size: 500
+      # 最多等待 50ms 获取可用数据,50ms中只要来了一条数据直接返回
+      poll-timeout-ms: 50
+      # true: 业务友好的 FlatMessage 模式；false: 精确的 Message/Entry 模式
+      flat-message: false
+
+platform:
+  # Off by default: existing cache-only deployments require no platform schema or extra datasource.
+  enabled: ${PLATFORM_ENABLED:false}
+  source-id: ${PLATFORM_SOURCE_ID:local-mysql-v1}
+  database: ${MYSQL_DB:demo_db}
+  group-id: platform-change-archive
+  tables: [users, departments, inventory]
+  targets:
+    demo-webhook:
+      url: http://localhost:8081/platform/demo/webhook
+      timeout-ms: 5000
+  datasource:
+    url: jdbc:mysql://${MYSQL_HOST:127.0.0.1}:${MYSQL_PORT:3306}/cdc_platform?useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true
+    username: ${PLATFORM_MYSQL_USER:${MYSQL_USER:root}}
+    password: ${PLATFORM_MYSQL_PASSWORD:${spring.datasource.password}}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    hikari:
+      maximum-pool-size: 4
+      connection-timeout: 5000
+      keepalive-time: 60000
+      validation-timeout: 1000
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,metrics,info,prometheus
+  metrics:
+    tags:
+      application: ${spring.application.name}
+
+logging:
+  level:
+    com.example.canalcache: INFO
+    com.alibaba.otter.canal: INFO

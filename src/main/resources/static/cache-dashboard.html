@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>缓存同步控制台</title>
+  <style>
+    :root{font-family:"Microsoft YaHei",system-ui,sans-serif;color:#233249;background:#f3f6fa;font-size:15px}
+    *{box-sizing:border-box}body{margin:0}main{max-width:1180px;margin:auto;padding:36px 24px}
+    header{display:flex;justify-content:space-between;align-items:center;gap:18px;margin-bottom:26px}
+    h1{font-size:28px;letter-spacing:.02em;margin:0 0 8px}h2{font-size:18px;margin:0 0 18px}
+    p{line-height:1.7;margin:6px 0;color:#617087}.muted{font-size:13px;color:#617087}
+    .cards{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-bottom:22px}
+    .card,section{background:white;border:1px solid #dfe6ef;border-radius:12px;padding:22px}
+    .card strong{display:block;font-size:27px;margin:10px 0 2px;color:#174ea6}.card span{font-size:13px;color:#617087}
+    section{margin-bottom:20px}.scroll{overflow-x:auto}table{width:100%;border-collapse:collapse;white-space:nowrap}
+    th,td{text-align:left;padding:13px 12px;border-bottom:1px solid #edf0f5;font-size:14px}
+    th{color:#617087;font-weight:500;background:#f8faff}tbody tr:last-child td{border-bottom:0}
+    label{display:block;font-size:13px;margin-bottom:8px;color:#617087}input,select,button{font:inherit;border-radius:7px}
+    input,select{width:100%;padding:11px 12px;border:1px solid #cbd5e3;background:white;color:#233249}
+    .controls{display:grid;grid-template-columns:220px 1fr;gap:16px;margin-bottom:16px}
+    .browse-controls{grid-template-columns:180px 180px 1fr}.query-input{grid-template-columns:1fr}
+    .buttons{display:flex;flex-wrap:wrap;gap:10px}button{cursor:pointer;padding:10px 17px;border:1px solid #bdcce1;background:white;color:#254c80}
+    button.primary{background:#245dc1;border-color:#245dc1;color:white}button.danger{color:#ae3a39;border-color:#e5c5c5}
+    button:disabled{opacity:.5;cursor:wait}button:focus-visible,input:focus-visible,select:focus-visible{outline:3px solid #9cbcf0;outline-offset:2px}
+    pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f7f9fc;border:1px solid #e3e9f1;padding:16px;border-radius:8px;font:13px/1.65 Consolas,monospace;max-height:380px;overflow:auto;margin:16px 0 0}
+    #notice{padding:12px 16px;border-radius:8px;background:#eaf2ff;color:#254c80;margin-bottom:20px}
+    #notice.error{background:#fbeceb;color:#9c2f2f}#errorDetail{color:#875d1c;background:#fff8e9;border-color:#f0dfb8}
+    .status-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.status-grid strong{font-weight:500;color:#233249}
+    @media(max-width:760px){main{padding:22px 14px}.cards{grid-template-columns:repeat(2,1fr)}header{align-items:flex-start;flex-direction:column}.controls,.status-grid{grid-template-columns:1fr}.card,section{padding:17px}}
+  </style>
+</head>
+<body>
+<main>
+  <nav style="margin-bottom:16px;"><a href="platform-dashboard.html" style="color:#245dc1;font-weight:600;text-decoration:none;">→ 切换至 数据库变更处理平台控制台</a></nav>
+  <header><div><h1>缓存同步控制台</h1><p>查看缓存使用情况，查询业务数据，维护指定缓存。</p></div><span class="muted" id="updated">正在连接…</span></header>
+  <div id="notice" role="status" aria-live="polite">正在读取运行状态。</div>
+  <div class="cards">
+    <div class="card"><span>已注册业务表</span><strong id="groupCount">—</strong><span>共用缓存同步流程</span></div>
+    <div class="card"><span>成功处理事件</span><strong id="processed">—</strong><span>重试可能重复计数</span></div>
+    <div class="card"><span>失败批次尝试</span><strong id="failed">—</strong><span>历史累计，不代表当前故障</span></div>
+    <div class="card"><span>同步删除缓存键</span><strong id="deleted">—</strong><span>不含手动失效操作</span></div>
+  </div>
+  <section><h2>缓存分组与查询统计</h2>
+    <div class="scroll"><table><thead><tr><th>业务表 / 缓存键</th><th>过期 / 空值</th><th>命中 / 未命中</th><th>命中率</th><th>查库次数 / ID 数</th><th>合并加载数</th></tr></thead><tbody id="groups"></tbody></table></div>
+    <p class="muted">统计按去重后的 ID 计数，空值缓存计为命中；查库次数包含失败尝试。所有统计随进程重启清零。</p>
+  </section>
+  <section><h2>浏览分组缓存</h2>
+    <div class="controls browse-controls"><div><label for="table">业务表（同时用于下方查询）</label><select id="table"></select></div><div><label for="scanCount">每批扫描量</label><select id="scanCount"><option>10</option><option selected>20</option><option>50</option><option>100</option></select></div><div class="buttons"><button id="browse">从头浏览当前分组</button><button id="nextPage" disabled>下一批</button></div></div>
+    <p id="browseStatus" class="muted">点击浏览即可查看当前分组缓存，无需预先输入 ID。</p>
+    <div class="scroll"><table><thead><tr><th>数据 ID</th><th>缓存键</th><th>操作</th></tr></thead><tbody id="entries"></tbody></table></div>
+    <p class="muted">列表包含加载中的条目。缓存会随时变化；每批条数不固定，可能重复或为空，“下一批”可用时仍可继续浏览。</p>
+  </section>
+  <section><h2>查询与缓存维护</h2>
+    <div class="controls query-input"><div><label for="ids">数据 ID（逗号分隔，最多 100 个正整数）</label><input id="ids" placeholder="例如：1,2,3" autocomplete="off"></div></div>
+    <div class="buttons"><button class="primary" id="query">查询业务数据</button><button id="inspect">查看缓存详情</button><button class="danger" id="invalidate">失效指定缓存</button></div>
+    <p class="muted">查看详情每次输入一个 ID。失效操作仅删除缓存，后续业务查询会重新加载数据。</p>
+    <pre id="result" aria-live="polite">选择业务表并输入 ID 后操作。</pre>
+  </section>
+  <section><h2>同步运行状态</h2><div class="status-grid"><p>服务启动标志：<strong id="started">—</strong></p><p>活跃消费者 / 配置数：<strong id="consumers">—</strong></p><p>最近成功确认：<strong id="lastSuccess">—</strong></p><p class="muted">消费者存活不等于 Kafka 或 Redis 连通；没有新消息时，成功时间不会更新。</p></div><pre id="errorDetail">尚未读取最近异常。</pre></section>
+</main>
+<script>
+  const $ = id => document.getElementById(id);
+  const routes = {users:'/users',departments:'/departments'};
+  const number = value => Number(value).toLocaleString('zh-CN');
+  const date = value => value ? new Date(typeof value==='number'?value*1000:value).toLocaleString('zh-CN') : '暂无';
+  let overviewFailed=false;
+  let nextCursor='0';
+  function notice(message,error=false){$('notice').textContent=message;$('notice').classList.toggle('error',error);}
+  async function api(path,options={}){
+    const response=await fetch(path,{...options,headers:{'Content-Type':'application/json',...options.headers}});
+    const text=await response.text();
+    if(!response.ok)throw new Error(`HTTP ${response.status}：${text||response.statusText}`);
+    return text ? JSON.parse(text) : null;
+  }
+  async function overview(){
+    const data=await api('/cache/overview');
+    $('groupCount').textContent=number(data.groups.length);
+    $('processed').textContent=number(data.processedEvents);$('failed').textContent=number(data.failedBatches);$('deleted').textContent=number(data.deletedKeys);
+    const selected=$('table').value;$('table').replaceChildren();$('groups').replaceChildren();
+    for(const group of data.groups){
+      const option=document.createElement('option');option.value=group.table;option.textContent=group.table;$('table').append(option);
+      const row=document.createElement('tr');
+      const cells=[`${group.table} / ${group.keyTemplate}`,`${group.expireSeconds}s / ${group.nullExpireSeconds}s`,`${number(group.hits)} / ${number(group.misses)}`,group.hitRate===null?'暂无样本':`${(group.hitRate*100).toFixed(1)}%`,`${number(group.databaseCalls)} / ${number(group.databaseIds)}`,number(group.coalescedLoads)];
+      for(const value of cells){const cell=document.createElement('td');cell.textContent=value;row.append(cell);}$('groups').append(row);
+    }
+    if(data.groups.some(group=>group.table===selected))$('table').value=selected;
+    $('started').textContent=data.sync.serviceStarted?'已启动':'未启动';
+    $('consumers').textContent=`${data.sync.activeConsumers} / ${data.sync.configuredConsumers}`;
+    $('lastSuccess').textContent=date(data.sync.lastSuccessAt);
+    const error=data.sync.lastError;
+    $('errorDetail').textContent=error?`最近异常（恢复后仍保留）\n${date(error.occurredAt)}\n${error.type}: ${error.message}`:'本次进程尚未记录同步异常。';
+    $('updated').textContent=`状态更新于 ${date(data.capturedAt)}`;
+    if(overviewFailed){notice('状态连接已恢复。');overviewFailed=false;}
+  }
+  function overviewError(error){overviewFailed=true;notice(`状态读取失败：${error.message}`,true);}
+  function inputIds(){
+    const text=$('ids').value.trim();const tokens=text.split(/[,，\s]+/);
+    if(!text||tokens.length>100||tokens.some(token=>!/^\d+$/.test(token)||!Number.isSafeInteger(Number(token))||Number(token)<=0))throw new Error('请输入 1 至 100 个正整数 ID；多个 ID 用逗号分隔。');
+    return tokens.map(Number);
+  }
+  function resetBrowse(){
+    nextCursor='0';$('entries').replaceChildren();$('nextPage').disabled=true;
+    $('browseStatus').textContent='分组已切换，点击浏览查看当前分组缓存。';
+  }
+  async function browse(cursor){
+    const table=$('table').value;
+    if(!table){notice('尚未取得已注册的业务表。',true);return;}
+    $('browse').disabled=true;$('nextPage').disabled=true;$('table').disabled=true;$('scanCount').disabled=true;
+    let succeeded=false;
+    try{
+      const page=await api(`/cache/groups/${encodeURIComponent(table)}/entries?cursor=${encodeURIComponent(cursor)}&count=${$('scanCount').value}`);
+      nextCursor=page.nextCursor;$('entries').replaceChildren();
+      for(const entry of page.entries){
+        const row=document.createElement('tr');
+        for(const value of [entry.id,entry.key]){const cell=document.createElement('td');cell.textContent=value;row.append(cell);}
+        const actions=document.createElement('td');
+        for(const [label,invalidate] of [['查看详情',false],['失效',true]]){
+          const button=document.createElement('button');button.textContent=label;
+          button.addEventListener('click',()=>entryAction(table,entry.id,invalidate,button));actions.append(button);
+        }
+        row.append(actions);$('entries').append(row);
+      }
+      $('browseStatus').textContent=`${table}：本批 ${page.entries.length} 项。${nextCursor==='0'?'本轮浏览已结束，可从头刷新。':'仍可继续下一批。'}`;
+      succeeded=true;
+    }catch(error){$('browseStatus').textContent=`浏览失败：${error.message}`;notice(error.message,true);}
+    finally{
+      $('browse').disabled=false;$('table').disabled=false;$('scanCount').disabled=false;
+      // 失败时保留原游标，可重试同一批；不把失败显示成扫描结束。
+      $('nextPage').disabled=nextCursor==='0';
+      if(!succeeded&&cursor!=='0')$('nextPage').disabled=false;
+    }
+  }
+  async function entryAction(table,id,invalidate,button){
+    button.disabled=true;
+    try{
+      // 列表 ID 是服务端返回的规范 Long 数字字符串，直接组成 JSON 数字，避免 Number 精度丢失。
+      const result=invalidate
+        ?await api(`/cache/entries/${encodeURIComponent(table)}/invalidate`,{method:'POST',body:`{"ids":[${id}]}`})
+        :await api(`/cache/entries/${encodeURIComponent(table)}/${id}`);
+      $('result').textContent=JSON.stringify(result,null,2);
+      notice(invalidate?`失效操作完成，实际删除 ${result.deletedKeys} 项，可从头浏览刷新列表。`:'缓存详情已显示在下方。');
+      await overview();
+    }catch(error){notice(error.message,true);}
+    finally{button.disabled=false;}
+  }
+  async function action(kind){
+    const buttons=document.querySelectorAll('.buttons button');buttons.forEach(button=>button.disabled=true);
+    try{
+      const ids=inputIds();const table=$('table').value;if(!table)throw new Error('尚未取得已注册的业务表。');
+      let result;
+      if(kind==='inspect'){
+        if(ids.length!==1)throw new Error('查看缓存详情时，请只输入一个 ID。');
+        result=await api(`/cache/entries/${encodeURIComponent(table)}/${ids[0]}`);
+      }else if(kind==='invalidate'){
+        result=await api(`/cache/entries/${encodeURIComponent(table)}/invalidate`,{method:'POST',body:JSON.stringify({ids})});
+      }else{
+        const route=routes[table];if(!route)throw new Error('该表尚未提供业务查询接口。');
+        result=ids.length===1?await api(`${route}/${ids[0]}`):await api(`${route}/batch`,{method:'POST',body:JSON.stringify({ids})});
+      }
+      $('result').textContent=JSON.stringify(result,null,2);notice(kind==='invalidate'?'指定缓存失效操作已完成。':'操作完成。');
+      await overview();
+    }catch(error){notice(error.message,true);$('result').textContent=error.message;}
+    finally{buttons.forEach(button=>button.disabled=false);}
+  }
+  $('query').addEventListener('click',()=>action('query'));
+  $('inspect').addEventListener('click',()=>action('inspect'));
+  $('invalidate').addEventListener('click',()=>action('invalidate'));
+  $('browse').addEventListener('click',()=>browse('0'));
+  $('nextPage').addEventListener('click',()=>browse(nextCursor));
+  $('table').addEventListener('change',resetBrowse);
+  $('scanCount').addEventListener('change',resetBrowse);
+  overview().then(()=>notice('已连接。状态每 3 秒更新。')).catch(overviewError);
+  setInterval(()=>overview().catch(overviewError),3000);
+</script>
+</body>
+</html>

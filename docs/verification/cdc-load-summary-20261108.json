@@ -1,0 +1,196 @@
+{
+  "before": {
+    "1": {
+      "write_response_ms": {
+        "count": 60,
+        "mean_ms": 35.847,
+        "p95_ms": 92.359,
+        "p99_ms": 272.124,
+        "max_ms": 272.124
+      },
+      "cache_invalidated_ms": {
+        "count": 60,
+        "mean_ms": 74.199,
+        "p95_ms": 174.725,
+        "p99_ms": 335.553,
+        "max_ms": 335.553
+      },
+      "extra_wait_after_write_response_ms": {
+        "count": 60,
+        "mean_ms": 38.352,
+        "p95_ms": 76.553,
+        "p99_ms": 103.455,
+        "max_ms": 103.455
+      }
+    },
+    "5": {
+      "write_response_ms": {
+        "count": 300,
+        "mean_ms": 98.508,
+        "p95_ms": 186.527,
+        "p99_ms": 329.317,
+        "max_ms": 400.249
+      },
+      "cache_invalidated_ms": {
+        "count": 300,
+        "mean_ms": 205.508,
+        "p95_ms": 346.577,
+        "p99_ms": 501.554,
+        "max_ms": 604.506
+      },
+      "extra_wait_after_write_response_ms": {
+        "count": 300,
+        "mean_ms": 107.206,
+        "p95_ms": 214.999,
+        "p99_ms": 265.128,
+        "max_ms": 352.342
+      }
+    },
+    "10": {
+      "write_response_ms": {
+        "count": 600,
+        "mean_ms": 133.399,
+        "p95_ms": 242.324,
+        "p99_ms": 340.118,
+        "max_ms": 468.996
+      },
+      "cache_invalidated_ms": {
+        "count": 600,
+        "mean_ms": 277.248,
+        "p95_ms": 469.914,
+        "p99_ms": 557.525,
+        "max_ms": 593.388
+      },
+      "extra_wait_after_write_response_ms": {
+        "count": 600,
+        "mean_ms": 144.385,
+        "p95_ms": 321.689,
+        "p99_ms": 391.595,
+        "max_ms": 458.126
+      }
+    },
+    "write_only": {
+      "successful_updates": 1503,
+      "write_seconds": 30.445,
+      "drain_seconds_total": 26.265,
+      "mean_drain_seconds": 13.133,
+      "http_updates_per_second": 49.368,
+      "updates_per_second_including_archive_drain": 26.503,
+      "response_latency": {
+        "count": 1503,
+        "mean_ms": 200.104,
+        "p95_ms": 353.007,
+        "p99_ms": 1485.8,
+        "max_ms": 2314.412
+      }
+    },
+    "resource_peak_lag": {
+      "platform-change-archive-v2": 426,
+      "canal-cache-sync-mq": 17
+    },
+    "min_host_available_mib": 408.26
+  },
+  "after": {
+    "1": {
+      "write_response_ms": {
+        "count": 60,
+        "mean_ms": 31.65,
+        "p95_ms": 54.255,
+        "p99_ms": 79.608,
+        "max_ms": 79.608
+      },
+      "cache_invalidated_ms": {
+        "count": 60,
+        "mean_ms": 57.845,
+        "p95_ms": 80.514,
+        "p99_ms": 137.601,
+        "max_ms": 137.601
+      },
+      "extra_wait_after_write_response_ms": {
+        "count": 60,
+        "mean_ms": 26.195,
+        "p95_ms": 39.4,
+        "p99_ms": 57.993,
+        "max_ms": 57.993
+      }
+    },
+    "5": {
+      "write_response_ms": {
+        "count": 300,
+        "mean_ms": 119.45,
+        "p95_ms": 223.329,
+        "p99_ms": 293.007,
+        "max_ms": 338.601
+      },
+      "cache_invalidated_ms": {
+        "count": 300,
+        "mean_ms": 177.573,
+        "p95_ms": 295.231,
+        "p99_ms": 346.975,
+        "max_ms": 363.319
+      },
+      "extra_wait_after_write_response_ms": {
+        "count": 300,
+        "mean_ms": 58.413,
+        "p95_ms": 139.314,
+        "p99_ms": 168.397,
+        "max_ms": 192.064
+      }
+    },
+    "10": {
+      "write_response_ms": {
+        "count": 600,
+        "mean_ms": 163.216,
+        "p95_ms": 299.137,
+        "p99_ms": 375.428,
+        "max_ms": 481.434
+      },
+      "cache_invalidated_ms": {
+        "count": 600,
+        "mean_ms": 262.027,
+        "p95_ms": 441.676,
+        "p99_ms": 621.868,
+        "max_ms": 706.212
+      },
+      "extra_wait_after_write_response_ms": {
+        "count": 600,
+        "mean_ms": 99.885,
+        "p95_ms": 271.474,
+        "p99_ms": 384.272,
+        "max_ms": 483.135
+      }
+    },
+    "write_only": {
+      "successful_updates": 1392,
+      "write_seconds": 30.336,
+      "drain_seconds_total": 7.66,
+      "mean_drain_seconds": 3.83,
+      "http_updates_per_second": 45.886,
+      "updates_per_second_including_archive_drain": 36.635,
+      "response_latency": {
+        "count": 1392,
+        "mean_ms": 216.216,
+        "p95_ms": 393.123,
+        "p99_ms": 502.759,
+        "max_ms": 715.088
+      }
+    },
+    "resource_peak_lag": {
+      "platform-change-archive-v2": 439,
+      "canal-cache-sync-mq": 45
+    },
+    "min_host_available_mib": 390.6
+  },
+  "formal_updates": 7318,
+  "all_completed": true,
+  "all_cleanup_ok": true,
+  "archived_versions_including_warmup_and_creation": 7858,
+  "runs": [
+    "A-single",
+    "B-batch5",
+    "C-batch10",
+    "A-repeat",
+    "D-archive-batch",
+    "D-archive-repeat"
+  ]
+}

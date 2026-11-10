@@ -1,0 +1,662 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>数据库变更处理平台控制台</title>
+  <style>
+    :root{font-family:"Microsoft YaHei",system-ui,sans-serif;color:#233249;background:#f3f6fa;font-size:14px}
+    *{box-sizing:border-box}body{margin:0}main{max-width:1200px;margin:auto;padding:28px 20px}
+    header{display:flex;justify-content:space-between;align-items:center;gap:18px;margin-bottom:20px}
+    h1{font-size:24px;letter-spacing:.02em;margin:0 0 6px}h2{font-size:16px;margin:0 0 14px}
+    p{line-height:1.6;margin:4px 0;color:#617087}.muted{font-size:12px;color:#617087}
+    .cards{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:20px}
+    .card,section{background:white;border:1px solid #dfe6ef;border-radius:10px;padding:18px}
+    .card strong{display:block;font-size:24px;margin:8px 0 2px;color:#174ea6}.card span{font-size:12px;color:#617087}
+    section{margin-bottom:18px}.scroll{overflow-x:auto}table{width:100%;border-collapse:collapse;white-space:nowrap}
+    th,td{text-align:left;padding:10px 12px;border-bottom:1px solid #edf0f5;font-size:13px}
+    th{color:#617087;font-weight:500;background:#f8faff}tbody tr:last-child td{border-bottom:0}
+    label{display:block;font-size:12px;margin-bottom:6px;color:#617087}input,select,button{font:inherit;border-radius:6px}
+    input,select{width:100%;padding:8px 10px;border:1px solid #cbd5e3;background:white;color:#233249}
+    .controls{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-bottom:14px}
+    .buttons{display:flex;flex-wrap:wrap;gap:8px}button{cursor:pointer;padding:8px 14px;border:1px solid #bdcce1;background:white;color:#254c80}
+    button.primary{background:#245dc1;border-color:#245dc1;color:white}button.danger{color:#ae3a39;border-color:#e5c5c5}
+    button.success{background:#1e7e34;border-color:#1e7e34;color:white}
+    button:disabled{opacity:.5;cursor:wait}button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid #9cbcf0}
+    pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f7f9fc;border:1px solid #e3e9f1;padding:14px;border-radius:6px;font:12px/1.6 Consolas,monospace;max-height:350px;overflow:auto;margin:12px 0 0}
+    #notice{padding:10px 14px;border-radius:6px;background:#eaf2ff;color:#254c80;margin-bottom:16px}
+    #notice.error{background:#fbeceb;color:#9c2f2f}
+    .nav-tabs{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:16px;border-bottom:2px solid #dfe6ef}
+    .tab-btn{padding:8px 16px;border:none;background:transparent;color:#617087;font-weight:600;cursor:pointer;border-bottom:3px solid transparent}
+    .tab-btn.active{color:#245dc1;border-bottom-color:#245dc1;background:white}
+    .tab-content{display:none}.tab-content.active{display:block}
+    .tag{display:inline-block;padding:2px 6px;border-radius:4px;font-size:11px;font-weight:600}
+    .tag.insert{background:#e6f4ea;color:#137333}.tag.update{background:#e8f0fe;color:#1a73e8}.tag.delete{background:#fce8e6;color:#c5221f}
+    .tag.success{background:#e6f4ea;color:#137333}.tag.failed{background:#fce8e6;color:#c5221f}.tag.retry{background:#fef7e0;color:#b06000}
+    @media(max-width:760px){.cards{grid-template-columns:repeat(2,1fr)}}
+  </style>
+</head>
+<body>
+<main>
+  <nav style="margin-bottom:14px;"><a href="cache-dashboard.html" style="color:#245dc1;font-weight:600;text-decoration:none;">← 返回 缓存同步控制台</a></nav>
+  <header>
+    <div>
+      <h1>数据库变更处理平台</h1>
+      <p>统一变更归档历史、辅助逆向恢复、条件订阅与可靠投递。</p>
+    </div>
+    <span class="muted" id="statusTime">正在刷新…</span>
+  </header>
+
+  <div id="notice">就绪。</div>
+
+  <div class="cards">
+    <div class="card"><span>登记接入表</span><strong id="cardTables">—</strong><span>受控采集范围</span></div>
+    <div class="card"><span>归档变更事件</span><strong id="cardEvents">—</strong><span>已记录历史</span></div>
+    <div class="card"><span>有效条件订阅</span><strong id="cardSubs">—</strong><span>多端规则投递</span></div>
+    <div class="card"><span>当前页待处理/重试</span><strong id="cardTasks">—</strong><span>按投递列表当前筛选统计</span></div>
+  </div>
+
+  <div class="nav-tabs">
+    <button class="tab-btn active" onclick="showTab('tab-events', this)">变更历史查找</button>
+    <button class="tab-btn" onclick="showTab('tab-recovery', this)">恢复 SQL 辅助</button>
+    <button class="tab-btn" onclick="showTab('tab-subs', this)">条件订阅管理</button>
+    <button class="tab-btn" onclick="showTab('tab-deliveries', this)">投递记录与重试</button>
+    <button class="tab-btn" onclick="showTab('tab-replay', this)">历史事件重放</button>
+    <button class="tab-btn" onclick="showTab('tab-tables', this)">接入表与快照</button>
+    <button id="stockoutDemoTab" class="tab-btn" hidden onclick="showTab('tab-stockout', this); resetStockouts()">缺货处理待办（示例）</button>
+  </div>
+
+  <!-- TAB 1: 变更历史查找 -->
+  <div id="tab-events" class="tab-content active">
+    <section>
+      <h2>变更事件检索</h2>
+      <div class="controls">
+        <div><label for="filterTable">业务表</label><select id="filterTable"><option value="">全部表</option></select></div>
+        <div><label for="filterKey">主键值</label><input id="filterKey" placeholder="精确主键值"></div>
+        <div><label for="filterOp">操作类型</label><select id="filterOp"><option value="">全部</option><option value="INSERT">INSERT</option><option value="UPDATE">UPDATE</option><option value="DELETE">DELETE</option></select></div>
+        <div><label for="filterFrom">开始时间</label><input type="datetime-local" id="filterFrom"></div>
+        <div><label for="filterTo">结束时间</label><input type="datetime-local" id="filterTo"></div>
+        <div style="display:flex;align-items:flex-end;"><button class="primary" onclick="resetSearch()">查询历史</button></div>
+      </div>
+      <div class="scroll">
+        <table>
+          <thead><tr><th>序号</th><th>事件 ID</th><th>表名</th><th>操作</th><th>主键</th><th>发生时间</th><th>位点</th><th>操作</th></tr></thead>
+          <tbody id="eventList"><tr><td colspan="8" class="muted">点击查询加载历史事件</td></tr></tbody>
+        </table>
+      </div>
+      <div class="buttons" style="margin-top:12px;">
+        <button id="btnPrevCursor" disabled onclick="prevCursor()">上一页</button>
+        <button id="btnNextCursor" disabled onclick="nextCursor()">下一页</button>
+      </div>
+      <pre id="eventDetail">点击列表“详情”查看字段差异与完整数据。</pre>
+    </section>
+  </div>
+
+  <!-- TAB 2: 恢复辅助 -->
+  <div id="tab-recovery" class="tab-content">
+    <section>
+      <h2>逆向恢复计划生成与预览</h2>
+      <p class="muted">根据单条变更事件生成逆向 SQL，经过只读预检查检测冲突，提供预览与文件下载（不在线执行）。</p>
+      <div class="controls" style="grid-template-columns:1fr auto;">
+        <div><label for="recoveryEventId">事件 ID (64位 SHA-256)</label><input id="recoveryEventId" placeholder="从历史事件列表复制或由下方自动带入"></div>
+        <div style="display:flex;align-items:flex-end;"><button class="primary" onclick="generatePlan()">生成恢复计划</button></div>
+      </div>
+      <div id="planResult" style="display:none;margin-top:14px;">
+        <p>计划 ID: <strong id="planId">—</strong></p>
+        <p>执行评估: <strong id="planExecutable">—</strong> (<span id="planReason">—</span>)</p>
+        <div class="buttons" style="margin:10px 0;">
+          <button class="success" id="btnDownloadSql" onclick="downloadSql()">下载恢复 SQL 文件</button>
+        </div>
+        <pre id="planSql"></pre>
+        <pre id="planCheckSummary"></pre>
+      </div>
+    </section>
+  </div>
+
+  <!-- TAB 3: 条件订阅管理 -->
+  <div id="tab-subs" class="tab-content">
+    <section>
+      <h2>已有订阅规则</h2>
+      <div class="scroll">
+        <table>
+          <thead><tr><th>订阅 ID</th><th>表名</th><th>目标别名</th><th>操作类型</th><th>限定变更字段</th><th>过滤条件</th><th>版本</th><th>状态</th><th>操作</th></tr></thead>
+          <tbody id="subList"><tr><td colspan="9" class="muted">加载中…</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+    <section>
+      <h2 id="subFormTitle">新建条件订阅</h2>
+      <p class="muted">多个变更字段必须全部变化才匹配。停用仅影响后续建任务，已生成任务继续投递。</p>
+      <div class="controls">
+        <div><label for="newSubTable">业务表</label><select id="newSubTable"></select></div>
+        <div><label for="newSubTarget">目标别名</label><select id="newSubTarget"></select></div>
+        <div><label for="newSubOps">操作（逗号分隔）</label><input id="newSubOps" value="UPDATE" placeholder="INSERT,UPDATE,DELETE"></div>
+        <div><label for="newSubChanged">限定变更字段 (仅 UPDATE)</label><input id="newSubChanged" placeholder="如 available"></div>
+        <div><label for="newSubFilterField">过滤字段 (after 数据)</label><input id="newSubFilterField" placeholder="如 available"></div>
+        <div><label for="newSubFilterVal">过滤期望值（保留空格，留空表示空字符串）</label><input id="newSubFilterVal" placeholder="如 0"><label><input type="checkbox" id="newSubFilterNull"> 值为 NULL</label></div>
+      </div>
+      <div class="buttons"><button class="primary" id="btnSaveSub" onclick="createSubscription()">创建订阅</button><button onclick="cancelEdit()">取消编辑</button></div>
+    </section>
+  </div>
+
+  <!-- TAB 4: 投递记录与重试 -->
+  <div id="tab-deliveries" class="tab-content">
+    <section>
+      <h2>HTTP 投递任务列表</h2>
+      <div class="controls">
+        <div><label for="delivStatus">状态筛选</label><select id="delivStatus"><option value="">全部</option><option value="PENDING">PENDING</option><option value="IN_FLIGHT">IN_FLIGHT</option><option value="SUCCEEDED">SUCCEEDED</option><option value="RETRY_WAIT">RETRY_WAIT</option><option value="FAILED">FAILED</option></select></div>
+        <div><label for="delivEventId">事件 ID</label><input id="delivEventId" placeholder="留空查看全部事件"></div>
+        <div><label for="delivSubscriptionId">订阅 ID</label><input id="delivSubscriptionId" placeholder="留空查看全部订阅"></div>
+        <div><label for="delivRoundId">重放任务 ID</label><input id="delivRoundId" placeholder="留空包含初次投递"></div>
+        <div style="display:flex;align-items:flex-end;"><button class="primary" onclick="resetDeliveries()">刷新任务</button></div>
+      </div>
+      <div class="scroll">
+        <table>
+          <thead><tr><th>任务 ID</th><th>Delivery ID</th><th>目标别名</th><th>轮次</th><th>状态</th><th>累计尝试 / 当前上限</th><th>下次重试时间</th><th>最近错误</th><th>操作</th></tr></thead>
+          <tbody id="deliveryList"><tr><td colspan="9" class="muted">加载中…</td></tr></tbody>
+        </table>
+      </div>
+      <div class="controls">
+        <button id="btnPrevDelivery" onclick="prevDelivery()" disabled>上一页</button>
+        <button id="btnNextDelivery" onclick="nextDelivery()" disabled>下一页</button>
+      </div>
+      <p class="muted">手动重试追加一次投递，保留 Delivery ID 和历次记录；本次失败后不再自动重试。</p>
+      <pre id="attemptDetail">点击“查看尝试”显示目标地址、来源事件、冻结规则及历次 HTTP 耗时、状态码与错误。</pre>
+    </section>
+  </div>
+
+  <!-- TAB 5: 历史事件重放 -->
+  <div id="tab-replay" class="tab-content">
+    <section>
+      <h2>创建事件重放任务</h2>
+      <p class="muted">重新分发已存档事件，冻结当前订阅快照，生成全新 deliveryId 与新轮次，不破坏位点或重置 Kafka。</p>
+      <div class="controls">
+        <div><label for="replayRequestKey">请求唯一标识 (幂等防重)</label><input id="replayRequestKey" placeholder="自动生成或手动输入"></div>
+        <div><label for="replaySubSelect">目标启用订阅</label><select id="replaySubSelect"></select></div>
+      </div>
+      <div style="margin-bottom:12px;">
+        <label for="replayEventIds">待重放事件 ID（每行或逗号分隔，最多 100 个）</label>
+        <textarea id="replayEventIds" rows="4" style="width:100%;padding:8px;border:1px solid #cbd5e3;border-radius:6px;font-family:monospace;"></textarea>
+      </div>
+      <div class="buttons"><button class="primary" onclick="submitReplay()">提交重放</button></div>
+      <pre id="replayResult">重放任务创建后在此查看匹配与跳过统计。</pre>
+      <div class="controls"><div><label for="replayJobId">查询重放任务 ID</label><input id="replayJobId"></div><button onclick="refreshReplay()">查询进度与投递结果</button><button onclick="viewReplayDeliveries()">查看本轮投递明细</button></div>
+    </section>
+  </div>
+
+  <!-- TAB 6: 接入表与快照 -->
+  <div id="tab-tables" class="tab-content">
+    <section>
+      <h2>已登记业务表与恢复能力</h2>
+      <div class="buttons"><button onclick="loadConsumerStatus()">刷新消费状态</button></div>
+      <pre id="consumerStatus">点击刷新查看缓存、归档消费状态及最近错误。</pre>
+      <div class="scroll">
+        <table>
+          <thead><tr><th>表名</th><th>主键</th><th>快照 ID</th><th>失效情况</th><th>恢复能力评估</th></tr></thead>
+          <tbody id="tableList"><tr><td colspan="5" class="muted">加载中…</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+  <div id="tab-stockout" class="tab-content">
+    <section>
+      <h2>缺货处理待办</h2>
+      <p class="muted">库存从正数降为 0 时，由通知创建待办。请先核实当前库存，再标记已处理；此操作不修改库存。同一来源事件的重试和重放不会重复创建待办。</p>
+      <div class="controls">
+        <div><label for="stockoutStatus">处理状态</label><select id="stockoutStatus"><option value="PENDING">待处理</option><option value="HANDLED">已处理</option><option value="">全部</option></select></div>
+        <div><label for="stockoutEventId">来源事件 ID</label><input id="stockoutEventId" placeholder="留空查看全部"></div>
+        <div style="display:flex;align-items:flex-end"><button class="primary" onclick="resetStockouts()">查询待办</button></div>
+      </div>
+      <div class="scroll"><table>
+        <thead><tr><th>待办 ID</th><th>商品 SKU</th><th>库存记录 ID</th><th>缺货发生时间</th><th>处理状态</th><th>处理时间</th><th>操作</th></tr></thead>
+        <tbody id="stockoutList"><tr><td colspan="7">点击查询待办</td></tr></tbody>
+      </table></div>
+      <div class="buttons" style="margin-top:12px"><button id="stockoutPrev" onclick="prevStockout()" disabled>上一页</button><button id="stockoutNext" onclick="nextStockout()" disabled>下一页</button></div>
+    </section>
+  </div>
+</main>
+
+<script>
+let currentPlanId = null;
+let currentCursor = null;
+let followingCursor = null;
+let previousCursors = [];
+let deliveryCursor = null;
+let followingDeliveryCursor = null;
+let previousDeliveryCursors = [];
+let deliveryTasks = [];
+let stockoutCursor = null;
+let stockoutDemoEnabled = false;
+let followingStockoutCursor = null;
+let previousStockoutCursors = [];
+let subscriptions = [];
+let editingSub = null;
+const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+function showTab(tabId, btn) {
+  document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
+  document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
+  document.getElementById(tabId).classList.add('active');
+  btn.classList.add('active');
+}
+
+function notice(msg, isError) {
+  const el = document.getElementById('notice');
+  el.textContent = msg;
+  el.className = isError ? 'error' : '';
+}
+
+async function api(url, opts) {
+  try {
+    const res = await fetch(url, opts);
+    if (!res.ok) {
+      const err = await res.text();
+      throw new Error(`HTTP ${res.status}: ${err}`);
+    }
+    const type = res.headers.get('content-type') || '';
+    return type.includes('application/json') ? res.json() : res.text();
+  } catch(e) {
+    notice(e.message, true);
+    throw e;
+  }
+}
+
+async function init() {
+  document.getElementById('statusTime').textContent = new Date().toLocaleTimeString();
+  document.getElementById('replayRequestKey').value = 'req-' + Date.now();
+  await loadTables();
+  const examples = await api('/platform/examples');
+  stockoutDemoEnabled = examples.includes('stockout');
+  document.getElementById('stockoutDemoTab').hidden = !stockoutDemoEnabled;
+  const targets = await api('/platform/targets');
+  document.getElementById('newSubTarget').innerHTML = targets.map(name => `<option value="${esc(name)}">${esc(name)}</option>`).join('');
+  await loadSubscriptions();
+  await loadDeliveries();
+  const eventId = new URLSearchParams(window.location.search).get('eventId');
+  if (eventId) await openEvent(eventId);
+}
+
+async function loadConsumerStatus() {
+  document.getElementById('consumerStatus').textContent = JSON.stringify(await api('/platform/consumers/status'), null, 2);
+}
+
+async function openEvent(eventId) {
+  showTab('tab-events', document.querySelectorAll('.tab-btn')[0]);
+  await viewDetail(eventId);
+}
+
+async function loadTables() {
+  const tables = await api('/platform/tables');
+  document.getElementById('cardTables').textContent = tables.length;
+  const tbody = document.getElementById('tableList');
+  const selFilter = document.getElementById('filterTable');
+  const selNewSub = document.getElementById('newSubTable');
+  tbody.innerHTML = '';
+  selFilter.innerHTML = '<option value="">全部表</option>';
+  selNewSub.innerHTML = '';
+
+  tables.forEach(t => {
+    selFilter.innerHTML += `<option value="${t.schema.table}">${t.schema.table}</option>`;
+    selNewSub.innerHTML += `<option value="${t.schema.table}">${t.schema.table}</option>`;
+    tbody.innerHTML += `<tr>
+      <td><strong>${t.schema.table}</strong></td>
+      <td>${t.schema.primaryKey}</td>
+      <td><code>${t.schema.snapshotId.substring(0, 16)}…</code></td>
+      <td>${esc(t.invalidatedReason || '未发现 DDL 失效')}</td>
+      <td>${esc(t.reason)}<br><button onclick="confirmBaseline('${t.schema.table}')">核实并建立恢复基线</button></td>
+    </tr>`;
+  });
+}
+
+async function confirmBaseline(table) {
+  if (!window.confirm('建立基线后，仅该 binlog 位点之后且结构相符的事件可用于恢复辅助。确认继续？')) return;
+  const baseline = await api(`/platform/tables/${table}/recovery-baseline`, {method:'POST'});
+  notice(`基线已核实：${baseline.binlogFile}:${baseline.position}`, false);
+  await loadTables();
+}
+
+async function resetSearch() { currentCursor = null; previousCursors = []; await loadEvents(); }
+async function nextCursor() {
+  if (!followingCursor) return;
+  previousCursors.push(currentCursor); currentCursor = followingCursor; await loadEvents();
+}
+async function prevCursor() {
+  if (!previousCursors.length) return;
+  currentCursor = previousCursors.pop(); await loadEvents();
+}
+
+async function loadEvents() {
+  const table = document.getElementById('filterTable').value;
+  const key = document.getElementById('filterKey').value.trim();
+  const op = document.getElementById('filterOp').value;
+  let q = `/platform/events?limit=20`;
+  if (table) q += `&table=${table}`;
+  if (key) q += `&key=${encodeURIComponent(key)}`;
+  if (op) q += `&operation=${op}`;
+  if (currentCursor) q += `&cursor=${currentCursor}`;
+  for (const [id, name] of [['filterFrom','from'], ['filterTo','to']]) {
+    const value = document.getElementById(id).value;
+    if (value) q += `&${name}=${new Date(value).getTime()}`;
+  }
+
+  const page = await api(q);
+  followingCursor = page.nextCursor;
+  document.getElementById('btnNextCursor').disabled = !followingCursor;
+  document.getElementById('btnPrevCursor').disabled = !previousCursors.length;
+  document.getElementById('cardEvents').textContent = page.items.length + (page.nextCursor ? '+' : '');
+  const tbody = document.getElementById('eventList');
+  tbody.innerHTML = '';
+  if (page.items.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="8" class="muted">无符合条件的事件</td></tr>';
+    return;
+  }
+
+  page.items.forEach((it, idx) => {
+    tbody.innerHTML += `<tr>
+      <td>${it.sequence}</td>
+      <td><code>${it.eventId.substring(0, 12)}…</code></td>
+      <td>${it.table}</td>
+      <td><span class="tag ${it.operation.toLowerCase()}">${it.operation}</span></td>
+      <td>${esc(it.primaryKeyValue)}</td>
+      <td>${new Date(it.eventTimeMillis).toLocaleTimeString()}</td>
+      <td><button onclick="viewDetail('${it.eventId}')">查看源位点</button></td>
+      <td>
+        <button onclick="viewDetail('${it.eventId}')">详情</button>
+        <button onclick="viewEventDeliveries('${it.eventId}')">投递</button>
+        <button onclick="selectForReplay('${it.eventId}')">重放</button>
+        ${stockoutDemoEnabled && it.table === 'inventory' ? `<button onclick="viewEventStockouts('${it.eventId}')">缺货待办</button>` : ''}
+        <button class="primary" onclick="selectForRecovery('${it.eventId}')">恢复</button>
+      </td>
+    </tr>`;
+  });
+}
+
+async function viewDetail(eventId) {
+  const detail = await api(`/platform/events/${eventId}`);
+  document.getElementById('eventDetail').textContent = JSON.stringify(detail, null, 2);
+}
+
+function selectForRecovery(eventId) {
+  document.getElementById('recoveryEventId').value = eventId;
+  showTab('tab-recovery', document.querySelectorAll('.tab-btn')[1]);
+  generatePlan();
+}
+
+async function generatePlan() {
+  const eventId = document.getElementById('recoveryEventId').value.trim();
+  if (!eventId) { notice('请输入 eventId', true); return; }
+  notice('正在生成恢复计划…', false);
+  const plan = await api('/platform/recovery-plans', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({eventId})
+  });
+  currentPlanId = plan.planId;
+  document.getElementById('planId').textContent = plan.planId;
+  document.getElementById('planExecutable').textContent = plan.executable ? '预检查通过，执行前仍需复核' : '不满足恢复条件，请查看原因';
+  document.getElementById('planExecutable').style.color = plan.executable ? '#137333' : '#c5221f';
+  document.getElementById('planReason').textContent = plan.reason;
+  document.getElementById('planSql').textContent = plan.generatedSql;
+  document.getElementById('planCheckSummary').textContent = plan.checkSummary;
+  document.getElementById('planResult').style.display = 'block';
+  notice('恢复计划已生成', false);
+}
+
+function downloadSql() {
+  if (!currentPlanId) return;
+  window.open(`/platform/recovery-plans/${currentPlanId}/sql`, '_blank');
+}
+
+async function loadSubscriptions() {
+  const subs = await api('/platform/subscriptions');
+  subscriptions = subs;
+  document.getElementById('cardSubs').textContent = subs.filter(s => s.enabled).length;
+  const tbody = document.getElementById('subList');
+  const selReplay = document.getElementById('replaySubSelect');
+  tbody.innerHTML = '';
+  selReplay.innerHTML = '';
+
+  subs.forEach(s => {
+    if (s.enabled) selReplay.innerHTML += `<option value="${s.subscriptionId}">${s.table} → ${s.targetName} (${s.operations})</option>`;
+    tbody.innerHTML += `<tr>
+      <td><code>${s.subscriptionId.substring(0, 10)}…</code></td>
+      <td>${s.table}</td>
+      <td>${s.targetName}</td>
+      <td>${s.operations}</td>
+      <td>${esc(s.changedFields || '—')}</td>
+      <td>${esc(s.filterField ? s.filterField + '=' + s.filterValue : '—')}</td>
+      <td>v${s.ruleVersion}</td>
+      <td>${s.enabled ? '<span class="tag success">启用</span>' : '<span class="tag delete">停用</span>'}</td>
+      <td><button onclick="toggleSub('${s.subscriptionId}', ${!s.enabled}, ${s.ruleVersion})">${s.enabled ? '停用' : '启用'}</button><button onclick="editSub('${s.subscriptionId}')">编辑</button></td>
+    </tr>`;
+  });
+}
+
+async function toggleSub(id, targetState, ver) {
+  await api(`/platform/subscriptions/${id}/enabled?expectedVersion=${ver}`, {
+    method: 'PUT',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({enabled: targetState})
+  });
+  notice(`订阅已${targetState ? '启用' : '停用'}`, false);
+  loadSubscriptions();
+}
+
+function editSub(id) {
+  editingSub = subscriptions.find(s => s.subscriptionId === id);
+  const s = editingSub;
+  for (const [field, value] of Object.entries({newSubTable:s.table,newSubTarget:s.targetName,newSubOps:s.operations,
+    newSubChanged:s.changedFields || '',newSubFilterField:s.filterField || '',newSubFilterVal:s.filterValue ?? ''})) {
+    document.getElementById(field).value = value;
+  }
+  document.getElementById('newSubFilterNull').checked = s.filterField != null && s.filterValue == null;
+  document.getElementById('subFormTitle').textContent = '编辑订阅 v' + s.ruleVersion;
+  document.getElementById('btnSaveSub').textContent = '保存修改';
+}
+function cancelEdit() {
+  editingSub = null;
+  document.getElementById('subFormTitle').textContent = '新建条件订阅';
+  document.getElementById('btnSaveSub').textContent = '创建订阅';
+}
+
+async function createSubscription() {
+  const table = document.getElementById('newSubTable').value;
+  const targetName = document.getElementById('newSubTarget').value.trim();
+  const ops = document.getElementById('newSubOps').value.split(',').map(s => s.trim()).filter(Boolean);
+  const changed = document.getElementById('newSubChanged').value.split(',').map(s => s.trim()).filter(Boolean);
+  const filterF = document.getElementById('newSubFilterField').value.trim();
+  const filterV = document.getElementById('newSubFilterVal').value;
+
+  await api(editingSub ? `/platform/subscriptions/${editingSub.subscriptionId}?expectedVersion=${editingSub.ruleVersion}` : '/platform/subscriptions', {
+    method: editingSub ? 'PUT' : 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({
+      table, targetName, operations: ops,
+      changedFields: changed.length ? changed : null,
+      filterField: filterF || null,
+      filterValue: filterF && !document.getElementById('newSubFilterNull').checked ? filterV : null,
+      enabled: editingSub ? editingSub.enabled : true
+    })
+  });
+  notice('订阅已保存', false);
+  cancelEdit();
+  loadSubscriptions();
+}
+
+async function resetDeliveries() {
+  deliveryCursor = null; previousDeliveryCursors = []; await loadDeliveries();
+}
+async function nextDelivery() {
+  if (!followingDeliveryCursor) return;
+  previousDeliveryCursors.push(deliveryCursor); deliveryCursor = followingDeliveryCursor; await loadDeliveries();
+}
+async function prevDelivery() {
+  if (!previousDeliveryCursors.length) return;
+  deliveryCursor = previousDeliveryCursors.pop(); await loadDeliveries();
+}
+async function viewEventDeliveries(eventId) {
+  document.getElementById('delivEventId').value = eventId;
+  document.getElementById('delivStatus').value = '';
+  document.getElementById('delivSubscriptionId').value = '';
+  document.getElementById('delivRoundId').value = '';
+  showTab('tab-deliveries', document.querySelectorAll('.tab-btn')[3]);
+  await resetDeliveries();
+}
+async function viewReplayDeliveries() {
+  const id = document.getElementById('replayJobId').value.trim();
+  if (!/^[a-f0-9]{64}$/.test(id)) { notice('请先选择重放任务', true); return; }
+  document.getElementById('delivRoundId').value = id;
+  document.getElementById('delivStatus').value = '';
+  document.getElementById('delivEventId').value = '';
+  document.getElementById('delivSubscriptionId').value = '';
+  showTab('tab-deliveries', document.querySelectorAll('.tab-btn')[3]);
+  await resetDeliveries();
+}
+function selectForReplay(eventId) {
+  document.getElementById('replayEventIds').value = eventId;
+  document.getElementById('replayRequestKey').value = 'req-' + Date.now();
+  showTab('tab-replay', document.querySelectorAll('.tab-btn')[4]);
+}
+async function loadDeliveries() {
+  const st = document.getElementById('delivStatus').value;
+  const eventId = document.getElementById('delivEventId').value.trim();
+  let q = '/platform/deliveries?limit=50';
+  if (st) q += `&status=${st}`;
+  if (eventId) q += `&eventId=${encodeURIComponent(eventId)}`;
+  for (const [id, name] of [['delivSubscriptionId','subscriptionId'], ['delivRoundId','roundId']]) {
+    const value = document.getElementById(id).value.trim();
+    if (value) q += `&${name}=${encodeURIComponent(value)}`;
+  }
+  if (deliveryCursor) q += `&cursor=${deliveryCursor}`;
+  const page = await api(q);
+  followingDeliveryCursor = page.nextCursor;
+  document.getElementById('btnNextDelivery').disabled = !followingDeliveryCursor;
+  document.getElementById('btnPrevDelivery').disabled = !previousDeliveryCursors.length;
+  const list = page.items;
+  deliveryTasks = list;
+  const pending = list.filter(t => t.status === 'PENDING' || t.status === 'RETRY_WAIT').length;
+  document.getElementById('cardTasks').textContent = pending;
+
+  const tbody = document.getElementById('deliveryList');
+  tbody.innerHTML = '';
+  if (list.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="9" class="muted">暂无任务</td></tr>';
+    return;
+  }
+  list.forEach(t => {
+    const isFailed = t.status === 'FAILED';
+    tbody.innerHTML += `<tr>
+      <td>${t.taskId}</td>
+      <td><code>${t.deliveryId.substring(0, 10)}…</code></td>
+      <td>${esc(t.targetName)}</td>
+      <td>${t.roundType}</td>
+      <td><span class="tag ${t.status.toLowerCase()}">${t.status}</span></td>
+      <td>${t.attemptCount} / ${t.maxAttempts}</td>
+      <td>${t.nextRetryAt ? new Date(t.nextRetryAt).toLocaleTimeString() : '—'}</td>
+      <td title="${esc(t.lastError || '')}">${esc((t.lastError || '—').slice(0,60))}</td>
+      <td>
+        <button onclick="openEvent('${t.eventId}')">来源事件</button>
+        ${stockoutDemoEnabled ? `<button onclick="viewEventStockouts('${t.eventId}')">缺货待办</button>` : ''}
+        <button onclick="loadAttempts('${t.taskId}')">查看尝试</button>
+        ${isFailed ? `<button class="primary" onclick="retryDelivery('${t.taskId}')">追加一次投递</button>` : ''}
+      </td>
+    </tr>`;
+  });
+}
+
+async function loadAttempts(taskId) {
+  const attempts = await api(`/platform/deliveries/${taskId}/attempts`);
+  const task = deliveryTasks.find(t => String(t.taskId) === String(taskId));
+  document.getElementById('attemptDetail').textContent = JSON.stringify({task, attempts}, null, 2);
+}
+
+async function retryDelivery(taskId) {
+  await api(`/platform/deliveries/${taskId}/retry`, {method: 'POST'});
+  notice(`任务 ${taskId} 已安排一次投递，历次记录保留`, false);
+  await loadDeliveries();
+}
+
+async function submitReplay() {
+  const key = document.getElementById('replayRequestKey').value.trim();
+  const subId = document.getElementById('replaySubSelect').value;
+  const rawIds = document.getElementById('replayEventIds').value;
+  const eventIds = rawIds.split(/[\n,]/).map(s => s.trim()).filter(Boolean);
+
+  if (!key || !subId || eventIds.length === 0) {
+    notice('请填写完整的请求标识、选择订阅并输入至少一个事件 ID', true);
+    return;
+  }
+
+  const result = await api('/platform/replay-jobs', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({requestKey: key, subscriptionId: subId, eventIds})
+  });
+
+  document.getElementById('replayResult').textContent = JSON.stringify(result, null, 2);
+  document.getElementById('replayJobId').value = result.jobId;
+  notice(`重放状态 ${result.status}：总计 ${result.totalEvents}，匹配 ${result.matchedEvents}，跳过 ${result.skippedEvents}；投递结果另查`, false);
+  loadDeliveries();
+}
+
+async function refreshReplay() {
+  const id = document.getElementById('replayJobId').value.trim();
+  if (!/^[a-f0-9]{64}$/.test(id)) { notice('请输入重放任务 ID', true); return; }
+  const job = await api(`/platform/replay-jobs/${id}`);
+  const deliveries = await api(`/platform/replay-jobs/${id}/delivery-stats`);
+  document.getElementById('replayResult').textContent = JSON.stringify({job,deliveries}, null, 2);
+}
+
+for (const id of ['filterTable','filterKey','filterOp','filterFrom','filterTo']) {
+  document.getElementById(id).addEventListener('change', () => { currentCursor=null; previousCursors=[]; followingCursor=null;
+    document.getElementById('btnNextCursor').disabled=true; document.getElementById('btnPrevCursor').disabled=true; });
+}
+
+async function resetStockouts() { stockoutCursor = null; previousStockoutCursors = []; await loadStockouts(); }
+async function nextStockout() {
+  if (!followingStockoutCursor) return;
+  previousStockoutCursors.push(stockoutCursor); stockoutCursor = followingStockoutCursor; await loadStockouts();
+}
+async function prevStockout() {
+  if (!previousStockoutCursors.length) return;
+  stockoutCursor = previousStockoutCursors.pop(); await loadStockouts();
+}
+async function viewEventStockouts(eventId) {
+  document.getElementById('stockoutEventId').value = eventId;
+  document.getElementById('stockoutStatus').value = '';
+  showTab('tab-stockout', document.querySelectorAll('.tab-btn')[6]);
+  await resetStockouts();
+}
+async function loadStockouts() {
+  let q = '/warehouse/stockout-tasks?limit=20';
+  const status = document.getElementById('stockoutStatus').value;
+  const eventId = document.getElementById('stockoutEventId').value.trim();
+  if (status) q += `&status=${status}`;
+  if (eventId) q += `&eventId=${encodeURIComponent(eventId)}`;
+  if (stockoutCursor) q += `&cursor=${stockoutCursor}`;
+  const page = await api(q);
+  followingStockoutCursor = page.nextCursor;
+  document.getElementById('stockoutPrev').disabled = !previousStockoutCursors.length;
+  document.getElementById('stockoutNext').disabled = !followingStockoutCursor;
+  document.getElementById('stockoutList').innerHTML = page.items.map(t => `<tr>
+    <td>${t.id}</td><td>${esc(t.sku)}</td><td>${t.inventoryId}</td><td>${new Date(t.eventTimeMillis).toLocaleString()}</td>
+    <td>${t.status === 'PENDING' ? '待处理' : '已处理'}</td><td>${t.handledAt ? new Date(t.handledAt).toLocaleString() : '—'}</td>
+    <td><button onclick="openEvent('${t.eventId}')">来源变更</button><button onclick="viewEventDeliveries('${t.eventId}')">投递记录</button>
+    ${t.status === 'PENDING' ? `<button class="primary" onclick="completeStockout('${t.id}')">标记已处理</button>` : ''}</td>
+  </tr>`).join('') || '<tr><td colspan="7" class="muted">无符合条件的待办</td></tr>';
+}
+async function completeStockout(id) {
+  await api(`/warehouse/stockout-tasks/${id}/complete`, {method:'POST'});
+  notice(`待办 ${id} 已处理`, false);
+  await loadStockouts();
+}
+for (const id of ['stockoutStatus','stockoutEventId']) {
+  document.getElementById(id).addEventListener('change', resetStockouts);
+}
+for (const id of ['delivStatus','delivEventId','delivSubscriptionId','delivRoundId']) {
+  document.getElementById(id).addEventListener('change', resetDeliveries);
+}
+window.onload = init;
+</script>
+</body>
+</html>

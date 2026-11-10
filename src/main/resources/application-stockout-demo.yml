@@ -1,0 +1,8 @@
+# 可选下游示例。显式启用 stockout-demo profile 后才加载。
+platform:
+  enabled: true
+  enabled-examples: [stockout]
+  targets:
+    stockout-workbench:
+      url: http://localhost:${server.port:8081}/warehouse/stockout-events
+      timeout-ms: 5000

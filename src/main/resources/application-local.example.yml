@@ -1,0 +1,35 @@
+# 首次运行时复制为 application-local.yml，使用 local profile 启动。
+# 所有连接信息都支持环境变量覆盖；compose 环境下的取值见 .env.example。
+#
+# 启动：mvn spring-boot:run "-Dspring-boot.run.profiles=local"
+spring:
+  datasource:
+    url: jdbc:mysql://${MYSQL_HOST:127.0.0.1}:${MYSQL_PORT:3306}/${MYSQL_DB:demo_db}?useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true
+    username: ${MYSQL_USER:demo}
+    password: ${MYSQL_PASSWORD:demo}
+  data:
+    redis:
+      host: ${REDIS_HOST:127.0.0.1}
+      port: ${REDIS_PORT:6379}
+      # Redis 未启用认证时保持空字符串
+      password: ${REDIS_PASSWORD:}
+      database: ${REDIS_DB:0}
+
+canal:
+  destination: example
+  mq:
+    kafka:
+      # 宿主机访问 compose 中的 Kafka 使用 29092
+      servers: ${KAFKA_BOOTSTRAP:127.0.0.1:29092}
+      topic: example
+      group-id: canal-cache-sync-local
+      # 首次演示先用一个 consumer，对应单分区 topic
+      partition-count: 1
+      batch-size: 100
+      poll-timeout-ms: 50
+      # 必须与 Canal Server 的 canal.mq.flatMessage=false 对应
+      flat-message: false
+
+logging:
+  level:
+    com.example.canalcache.mapper: DEBUG

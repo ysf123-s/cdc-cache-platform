@@ -5,6 +5,7 @@
 - 批次恢复和消费者状态测试改用 `getRecordsWithoutAck()`，与当前 Kafka 消息接口保持一致，修复测试空轮询无法结束的问题。
 - 两个消费循环测试增加 10 秒超时，CI 作业设置 20 分钟上限。
 - Testcontainers 升级至 1.21.4，修复新版 Docker Engine 拒绝旧客户端 API 的兼容问题。
+- MySQL 恢复测试使用 `MySQLContainer` 的 JDBC 就绪检查，避免数据库初始化期间提前开始测试。
 
 ## 2026-11-10
 

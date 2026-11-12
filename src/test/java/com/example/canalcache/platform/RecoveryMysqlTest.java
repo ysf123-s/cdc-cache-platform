@@ -16,8 +16,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.*;
 import org.springframework.jdbc.datasource.init.ScriptUtils;
 import org.springframework.transaction.support.TransactionTemplate;
-import org.testcontainers.containers.GenericContainer;
-import org.testcontainers.containers.wait.strategy.Wait;
+import org.testcontainers.containers.MySQLContainer;
 import org.testcontainers.junit.jupiter.*;
 import org.testcontainers.utility.DockerImageName;
 import java.sql.Types;
@@ -28,11 +27,10 @@ import static org.assertj.core.api.Assertions.*;
 /** Real MySQL SQL modes, collation, metadata and recovery execution. Requires Docker. */
 @Testcontainers(disabledWithoutDocker = true)
 class RecoveryMysqlTest {
-    @Container static GenericContainer<?> mysql = new GenericContainer<>(DockerImageName.parse("mysql:8.0"))
-            .withEnv("MYSQL_ROOT_PASSWORD","test-password").withEnv("MYSQL_ROOT_HOST","%")
-            .withEnv("MYSQL_DATABASE","demo_db").withExposedPorts(3306)
-            .withCommand("--server-id=11","--log-bin=mysql-bin","--binlog-format=ROW","--binlog-row-image=FULL")
-            .waitingFor(Wait.forLogMessage(".*ready for connections.*",2));
+    @Container static MySQLContainer<?> mysql = new MySQLContainer<>(DockerImageName.parse("mysql:8.0"))
+            .withUsername("root").withPassword("test-password").withEnv("MYSQL_ROOT_HOST","%")
+            .withDatabaseName("demo_db")
+            .withCommand("--server-id=11","--log-bin=mysql-bin","--binlog-format=ROW","--binlog-row-image=FULL");
     JdbcTemplate db;
     DriverManagerDataSource business;
     PlatformProperties properties;

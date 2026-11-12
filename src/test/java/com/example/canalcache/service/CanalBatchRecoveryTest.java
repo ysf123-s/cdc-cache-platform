@@ -7,6 +7,7 @@ import com.example.canalcache.annotation.CacheStrategy;
 import com.example.canalcache.detector.BigKeyDetector;
 import com.example.canalcache.model.AutoCacheConfig;
 import com.example.canalcache.model.BinlogVersion;
+import com.example.canalcache.model.KafkaCanalRecord;
 import com.example.canalcache.parser.BinlogParser;
 import com.example.canalcache.parser.FlatMessageBinlogParser;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -14,6 +15,7 @@ import com.google.protobuf.ByteString;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -53,8 +55,9 @@ class CanalBatchRecoveryTest {
     }
 
     @Test
+    @Timeout(10)
     void redisFailureRollsBackAndRetriesBeforeAcknowledging() {
-        when(consumer.getMessagesWithoutAck()).thenReturn(List.of(message(CanalEntry.EventType.UPDATE)));
+        when(consumer.getRecordsWithoutAck()).thenReturn(List.of(record(CanalEntry.EventType.UPDATE)));
         when(redis.execute(any(RedisScript.class), anyList(), any(Object[].class)))
                 .thenThrow(new RedisConnectionFailureException("Redis unavailable"))
                 .thenReturn(1L);
@@ -67,9 +70,9 @@ class CanalBatchRecoveryTest {
         ReflectionTestUtils.invokeMethod(service, "doSyncLoop", consumer);
 
         var order = inOrder(consumer);
-        order.verify(consumer).getMessagesWithoutAck();
+        order.verify(consumer).getRecordsWithoutAck();
         order.verify(consumer).rollback();
-        order.verify(consumer).getMessagesWithoutAck();
+        order.verify(consumer).getRecordsWithoutAck();
         order.verify(consumer).ack();
         verify(consumer, times(1)).ack();
         assertThat(service.getStatus().lastSuccessAt()).isNotNull();
@@ -98,7 +101,8 @@ class CanalBatchRecoveryTest {
                 .setEntryType(CanalEntry.EntryType.ROWDATA)
                 .setStoreValue(ByteString.copyFrom(new byte[]{10, 5, 1}))
                 .build();
-        when(consumer.getMessagesWithoutAck()).thenReturn(List.of(new Message(1L, List.of(entry))));
+        when(consumer.getRecordsWithoutAck()).thenReturn(List.of(
+                new KafkaCanalRecord("canal-test", 0, 0L, new Message(1L, List.of(entry)))));
 
         assertThatThrownBy(() -> service.processBatch(consumer))
                 .isInstanceOf(IllegalArgumentException.class)
@@ -108,7 +112,7 @@ class CanalBatchRecoveryTest {
 
     @Test
     void filteredDdlBatchIsAcknowledged() {
-        when(consumer.getMessagesWithoutAck()).thenReturn(List.of(message(CanalEntry.EventType.CREATE)));
+        when(consumer.getRecordsWithoutAck()).thenReturn(List.of(record(CanalEntry.EventType.CREATE)));
 
         assertThat(service.processBatch(consumer)).isTrue();
 
@@ -122,7 +126,7 @@ class CanalBatchRecoveryTest {
     void insertInvalidatesBeforeAcknowledgingForEveryStrategy(CacheStrategy strategy) {
         config.setStrategy(strategy);
         config.setEnableVersionControl(false);
-        when(consumer.getMessagesWithoutAck()).thenReturn(List.of(message(CanalEntry.EventType.INSERT)));
+        when(consumer.getRecordsWithoutAck()).thenReturn(List.of(record(CanalEntry.EventType.INSERT)));
         when(redis.delete("user:1")).thenReturn(true);
 
         assertThat(service.processBatch(consumer)).isTrue();
@@ -135,7 +139,7 @@ class CanalBatchRecoveryTest {
 
     @Test
     void emptyPollIsNotAcknowledged() {
-        when(consumer.getMessagesWithoutAck()).thenReturn(List.of());
+        when(consumer.getRecordsWithoutAck()).thenReturn(List.of());
 
         assertThat(service.processBatch(consumer)).isFalse();
 
@@ -145,7 +149,7 @@ class CanalBatchRecoveryTest {
 
     @Test
     void failedAcknowledgmentDoesNotRecordSuccessfulBatch() {
-        when(consumer.getMessagesWithoutAck()).thenReturn(List.of(message(CanalEntry.EventType.CREATE)));
+        when(consumer.getRecordsWithoutAck()).thenReturn(List.of(record(CanalEntry.EventType.CREATE)));
         doThrow(new IllegalStateException("commit failed")).when(consumer).ack();
 
         assertThatThrownBy(() -> service.processBatch(consumer)).isInstanceOf(IllegalStateException.class);
@@ -171,7 +175,7 @@ class CanalBatchRecoveryTest {
         order.verify(consumer).ack();
     }
 
-    private Message message(CanalEntry.EventType type) {
+    private KafkaCanalRecord record(CanalEntry.EventType type) {
         CanalEntry.Column id = CanalEntry.Column.newBuilder().setName("id").setValue("1").build();
         CanalEntry.RowChange change = CanalEntry.RowChange.newBuilder().setEventType(type)
                 .addRowDatas(CanalEntry.RowData.newBuilder().addBeforeColumns(id).addAfterColumns(id)).build();
@@ -179,6 +183,6 @@ class CanalBatchRecoveryTest {
                 .setHeader(CanalEntry.Header.newBuilder().setTableName("users")
                         .setLogfileName("mysql-bin.000001").setLogfileOffset(100L))
                 .setEntryType(CanalEntry.EntryType.ROWDATA).setStoreValue(change.toByteString()).build();
-        return new Message(1L, List.of(entry));
+        return new KafkaCanalRecord("canal-test", 0, 0L, new Message(1L, List.of(entry)));
     }
 }

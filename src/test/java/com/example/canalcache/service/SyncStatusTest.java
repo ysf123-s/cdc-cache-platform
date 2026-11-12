@@ -7,6 +7,7 @@ import com.example.canalcache.parser.FlatMessageBinlogParser;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
@@ -47,11 +48,12 @@ class SyncStatusTest {
     }
 
     @Test
+    @Timeout(10)
     void activeConsumerCountTracksActualLoopAndIdleDoesNotBecomeFailure() {
         assertThat(service.getStatus().serviceStarted()).isFalse();
         assertThat(service.getStatus().activeConsumers()).isZero();
         when(connector.createPartitionConsumer()).thenReturn(consumer);
-        when(consumer.getMessagesWithoutAck()).thenAnswer(invocation -> {
+        when(consumer.getRecordsWithoutAck()).thenAnswer(invocation -> {
             assertThat(service.getStatus().activeConsumers()).isEqualTo(1);
             service.stop();
             return List.of();

@@ -11,6 +11,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.*;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.springframework.core.io.FileSystemResource;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.*;
@@ -27,9 +28,10 @@ import static org.assertj.core.api.Assertions.*;
 /** Real MySQL SQL modes, collation, metadata and recovery execution. Requires Docker. */
 @Testcontainers(disabledWithoutDocker = true)
 class RecoveryMysqlTest {
-    @Container static MySQLContainer<?> mysql = new MySQLContainer<>(DockerImageName.parse("mysql:8.0"))
+    @Container static MySQLContainer<?> mysql = new MySQLContainer<>(DockerImageName.parse(System.getProperty("test.mysql.image", "mysql:8.0")))
             .withUsername("root").withPassword("test-password").withEnv("MYSQL_ROOT_HOST","%")
             .withDatabaseName("demo_db")
+            .withConfigurationOverride("mysql-recovery")
             .withCommand("--server-id=11","--log-bin=mysql-bin","--binlog-format=ROW","--binlog-row-image=FULL");
     JdbcTemplate db;
     DriverManagerDataSource business;
@@ -107,6 +109,129 @@ class RecoveryMysqlTest {
         finally {db.execute("SET GLOBAL binlog_row_image='FULL'");}
         db.execute("CREATE TRIGGER inventory_trigger BEFORE INSERT ON inventory FOR EACH ROW SET NEW.price=1");
         assertThatThrownBy(()->recovery.confirmBaseline("inventory")).hasMessageContaining("triggers");
+    }
+    record TypeCase(String type, String beforeSql, String afterSql, String beforeCanal, String afterCanal) {
+        @Override public String toString() { return type + " " + beforeCanal; }
+    }
+    static java.util.stream.Stream<TypeCase> recoveryTypes() {
+        return java.util.stream.Stream.of(
+                new TypeCase("BIT(1)", "0", "1", "0", "1"),
+                new TypeCase("BIT(8)", "255", "0", "255", "0"),
+                new TypeCase("BIT(64)", "18446744073709551615", "0", "-1", "0"),
+                new TypeCase("TINYINT(1)", "2", "3", "2", "3"),
+                new TypeCase("FLOAT", "CAST(0.1 AS FLOAT)", "CAST(0.2 AS FLOAT)", "0.1", "0.2"),
+                new TypeCase("DOUBLE", "CAST(0.10000000000000002 AS DOUBLE)", "CAST(0.2 AS DOUBLE)", "0.10000000000000002", "0.2"),
+                new TypeCase("JSON", "CAST('{\"a\":1,\"s\":\"中文\"}' AS JSON)", "CAST('{\"b\":[2,3],\"a\":2}' AS JSON)",
+                        "{\"s\":\"中文\",\"a\":1}", "{ \"a\":2, \"b\":[2,3] }"),
+                new TypeCase("JSON", "CAST('null' AS JSON)", "CAST('[1,true]' AS JSON)", "null", "[1,true]"),
+                new TypeCase("ENUM('新建','完成')", "'新建'", "'完成'", "1", "2"),
+                new TypeCase("SET('red','blue','green')", "'red,blue'", "'green'", "3", "4"),
+                new TypeCase("YEAR", "0", "2026", "0000", "2026"),
+                new TypeCase("TIME(6)", "'-25:03:04.123456'", "'25:03:04.654321'", "-25:03:04.123456", "25:03:04.654321"),
+                new TypeCase("TIME(6)", "'838:59:59'", "'-838:59:59'", "838:59:59", "-838:59:59"),
+                new TypeCase("BINARY(4)", "X'00ff275c'", "X'01020304'", "\0\u00ff'\\", "\u0001\u0002\u0003\u0004"),
+                new TypeCase("VARBINARY(10)", "X'00ff275c'", "X'01020304'", "\0\u00ff'\\", "\u0001\u0002\u0003\u0004"),
+                new TypeCase("BLOB", "X'00ff275c'", "X'01020304'", "\0\u00ff'\\", "\u0001\u0002\u0003\u0004"),
+                new TypeCase("TIMESTAMP(6)", "'2026-10-18 12:00:00.123456+08:00'", "'2026-10-19 13:14:15.654321+08:00'",
+                        "2026-10-18 12:00:00.123456", "2026-10-19 13:14:15.654321"));
+    }
+
+    private void configureTypesTable(String columns) throws Exception {
+        db.execute("DROP TABLE inventory");
+        db.execute("CREATE TABLE inventory(id BIGINT PRIMARY KEY," + columns + ") CHARACTER SET utf8mb4");
+        var platform = new DriverManagerDataSource(business.getUrl().replace("demo_db", "cdc_platform"), "root", "test-password");
+        var tables = TableRegistry.capture(properties, store, business, platform);
+        archive = new ArchiveService(properties, tables, new BinlogParser(), store, new TransactionTemplate(new DataSourceTransactionManager(platform)));
+        recovery = new RecoveryService(properties, tables, store, db, new ObjectMapper());
+        baseline = recovery.confirmBaseline("inventory");
+    }
+
+    private String typeEvent(EventType type, String before, String after, long offset) {
+        var schema = store.findSchema(baseline.snapshotId());
+        var definition = schema.columns().get(1);
+        var row = CanalEntry.RowData.newBuilder();
+        if (type != EventType.INSERT) row.addBeforeColumns(column("id", "1", 0, Types.BIGINT, "bigint", true))
+                .addBeforeColumns(column("v", before, 1, definition.jdbcType(), definition.typeName(), false));
+        if (type != EventType.DELETE) row.addAfterColumns(column("id", "1", 0, Types.BIGINT, "bigint", true))
+                .addAfterColumns(column("v", after, 1, definition.jdbcType(), definition.typeName(), false));
+        var entry = CanalEntry.Entry.newBuilder().setEntryType(CanalEntry.EntryType.ROWDATA)
+                .setHeader(CanalEntry.Header.newBuilder().setSchemaName("demo_db").setTableName("inventory")
+                        .setLogfileName(baseline.binlogFile()).setLogfileOffset(baseline.position() + offset))
+                .setStoreValue(CanalEntry.RowChange.newBuilder().setEventType(type).addRowDatas(row).build().toByteString()).build();
+        archive.archive(new KafkaCanalRecord("example", 0, offset, new Message(offset, List.of(entry))));
+        return store.search(properties, new ArchivedChange.Filter(null, null, null, null, null, null, 1)).items().get(0).eventId();
+    }
+
+    @ParameterizedTest(name="{0}") @MethodSource("recoveryTypes")
+    void supportedTypesGenerateExecutableUpdateInsertAndDeleteRecovery(TypeCase sample) throws Exception {
+        configureTypesTable("v " + sample.type());
+        db.update("INSERT INTO inventory VALUES(1," + sample.afterSql() + ")");
+        var update = recovery.createPlan(typeEvent(EventType.UPDATE, sample.beforeCanal(), sample.afterCanal(), 1));
+        assertThat(update.executable()).describedAs(update.reason()).isTrue();
+        assertThat(execute("NO_BACKSLASH_ESCAPES", update.generatedSql())).isEqualTo(1);
+        assertRestoredValue(sample);
+        assertThat(execute("", update.generatedSql())).isZero();
+        db.update("DELETE FROM inventory");
+        var insert = recovery.createPlan(typeEvent(EventType.DELETE, sample.beforeCanal(), null, 2));
+        assertThat(insert.executable()).describedAs(insert.reason()).isTrue();
+        assertThat(execute("NO_BACKSLASH_ESCAPES", insert.generatedSql())).isEqualTo(1);
+        assertRestoredValue(sample);
+        var delete = recovery.createPlan(typeEvent(EventType.INSERT, null, sample.beforeCanal(), 3));
+        assertThat(delete.executable()).describedAs(delete.reason()).isTrue();
+        assertThat(execute("", delete.generatedSql())).isEqualTo(1);
+    }
+
+    private void assertRestoredValue(TypeCase sample) {
+        if (sample.type().startsWith("TIMESTAMP")) {
+            var expected = java.math.BigDecimal.valueOf(java.time.Instant.parse("2026-10-18T04:00:00Z").getEpochSecond())
+                    .add(new java.math.BigDecimal("0.123456"));
+            assertThat(db.queryForObject("SELECT UNIX_TIMESTAMP(v) FROM inventory", java.math.BigDecimal.class)).isEqualByComparingTo(expected);
+        } else {
+            assertThat(db.queryForObject("SELECT v <=> " + sample.beforeSql() + " FROM inventory", Integer.class)).isEqualTo(1);
+        }
+    }
+
+    @ParameterizedTest @ValueSource(strings={"+00:00", "+08:00", "-05:00"})
+    void timestampRecoveryDoesNotDependOnExecutionSessionTimeZone(String targetZone) throws Exception {
+        configureTypesTable("v TIMESTAMP(6) NULL");
+        db.execute("INSERT INTO inventory VALUES(1,'2026-10-19 13:14:15.654321+08:00')");
+        var plan = recovery.createPlan(typeEvent(EventType.UPDATE, "2026-10-18 12:00:00.123456", "2026-10-19 13:14:15.654321", 1));
+        assertThat(plan.executable()).describedAs(plan.reason()).isTrue();
+        try (var connection = business.getConnection(); var statement = connection.createStatement()) {
+            statement.execute("SET time_zone='" + targetZone + "'");
+            assertThat(statement.executeUpdate(plan.generatedSql())).isEqualTo(1);
+            try (var result = statement.executeQuery("SELECT UNIX_TIMESTAMP(v) FROM inventory")) {
+                result.next();
+                var expected = java.math.BigDecimal.valueOf(java.time.Instant.parse("2026-10-18T04:00:00Z").getEpochSecond())
+                        .add(new java.math.BigDecimal("0.123456"));
+                assertThat(result.getBigDecimal(1)).isEqualByComparingTo(expected);
+            }
+        }
+    }
+
+    @Test void ordinaryFieldRecoveryPreservesAnUnchangedAutoUpdateTimestamp() throws Exception {
+        configureTypesTable("v TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6), note VARCHAR(20)");
+        db.execute("INSERT INTO inventory VALUES(1,'2026-10-18 12:00:00.123456+08:00','new')");
+        var row = CanalEntry.RowData.newBuilder();
+        for (boolean after : List.of(false, true)) {
+            var values = List.of(column("id", "1", 0, Types.BIGINT, "bigint", true),
+                    column("v", "2026-10-18 12:00:00.123456", 1, Types.TIMESTAMP, "timestamp(6)", false),
+                    column("note", after ? "new" : "old", 2, Types.VARCHAR, "varchar(20)", false));
+            if (after) row.addAllAfterColumns(values); else row.addAllBeforeColumns(values);
+        }
+        var entry = CanalEntry.Entry.newBuilder().setEntryType(CanalEntry.EntryType.ROWDATA)
+                .setHeader(CanalEntry.Header.newBuilder().setSchemaName("demo_db").setTableName("inventory")
+                        .setLogfileName(baseline.binlogFile()).setLogfileOffset(baseline.position()))
+                .setStoreValue(CanalEntry.RowChange.newBuilder().setEventType(EventType.UPDATE).addRowDatas(row).build().toByteString()).build();
+        archive.archive(new KafkaCanalRecord("example", 0, 1, new Message(1, List.of(entry))));
+        String id = store.search(properties, new ArchivedChange.Filter(null,null,null,null,null,null,1)).items().get(0).eventId();
+        var plan = recovery.createPlan(id);
+        assertThat(plan.executable()).describedAs(plan.reason()).isTrue();
+        assertThat(execute("", plan.generatedSql())).isEqualTo(1);
+        assertThat(db.queryForObject("SELECT note FROM inventory", String.class)).isEqualTo("old");
+        assertThat(db.queryForObject("SELECT UNIX_TIMESTAMP(v) FROM inventory", java.math.BigDecimal.class))
+                .isEqualByComparingTo(java.math.BigDecimal.valueOf(java.time.Instant.parse("2026-10-18T04:00:00Z").getEpochSecond())
+                        .add(new java.math.BigDecimal("0.123456")));
     }
     @ParameterizedTest @ValueSource(strings={"imported", "exported"})
     void foreignKeyBaselineAllowsOrdinaryFieldRecovery(String direction) throws Exception {

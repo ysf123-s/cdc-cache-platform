@@ -1,5 +1,13 @@
 # 发布验证
 
+## 2026-11-17：恢复 SQL 类型扩展
+
+- 补齐 BIT、TIMESTAMP、FLOAT/DOUBLE、JSON、ENUM/SET、YEAR、TIME、BINARY/VARBINARY/BLOB 的值生成及当前行比较。BIT(64) 按 Canal 的有符号 long 表示还原位模式；ENUM/SET 使用 Canal 记录的编号。
+- TIMESTAMP 根据 `platform.binlog-time-zone` 解读，输出带 UTC 偏移的值，保护条件按 Unix 时间比较；恢复普通字段时显式保留时间值，避免 ON UPDATE 自动刷新。
+- TIME 直接读取完整字符值，避免 TIME_TO_SEC 在云端版本中截断小数秒。TINYINT(1) 按数据库实际列类型识别，避免 JDBC 布尔转换丢失数值。
+- Instabox 独立 MySQL 容器执行 `RecoveryMysqlTest`：29 项通过、0 失败、0 跳过。覆盖新类型的 UPDATE、INSERT、DELETE 逆向 SQL 实际执行，以及三种会话时区和后续写入保护。
+- 保留已有外键事件限制、完整镜像、基线、当前结构和当前数据检查；生成列、触发器与空间类型仍有明确限制。
+
 ## 2026-11-17：普通字段恢复支持外键表
 
 - 结构快照记录本表引用列和被引用列，基线不再因为存在外键就拒绝整张表。

@@ -83,17 +83,20 @@ public class TableRegistry {
                 }
             }
             Map<String, String[]> text = new LinkedHashMap<>();
-            try (var stmt = source.prepareStatement("SELECT COLUMN_NAME,CHARACTER_SET_NAME,COLLATION_NAME,GENERATION_EXPRESSION FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=? AND TABLE_NAME=?")) {
+            try (var stmt = source.prepareStatement("SELECT COLUMN_NAME,CHARACTER_SET_NAME,COLLATION_NAME,GENERATION_EXPRESSION,COLUMN_TYPE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=? AND TABLE_NAME=?")) {
                 stmt.setString(1, source.getCatalog()); stmt.setString(2, table);
                 try (ResultSet rs = stmt.executeQuery()) {
-                    while (rs.next()) text.put(rs.getString(1), new String[]{rs.getString(2), rs.getString(3), rs.getString(4)});
+                    while (rs.next()) text.put(rs.getString(1), new String[]{rs.getString(2), rs.getString(3), rs.getString(4), rs.getString(5)});
                 }
             }
             columns = columns.stream().map(c -> {
                 String[] info = text.get(c.name());
                 // Connector/J 会把 DEFAULT_GENERATED 时间戳也标为生成列；实际生成列有表达式。
                 boolean generated = info[2] != null && !info[2].isBlank();
-                return new TableSchema.ColumnDefinition(c.name(), c.ordinal(), c.jdbcType(), c.typeName(), c.size(), c.scale(),
+                boolean tinyInt = (c.jdbcType() == Types.BIT || c.jdbcType() == Types.BOOLEAN) && info[3].startsWith("tinyint");
+                String typeName = tinyInt || info[3].startsWith("enum(") || info[3].startsWith("set(") ? info[3] : c.typeName();
+                return new TableSchema.ColumnDefinition(c.name(), c.ordinal(), tinyInt ? Types.TINYINT : c.jdbcType(),
+                        typeName, c.size(), c.scale(),
                         c.nullable(), c.autoIncrement(), generated, info[0], info[1]);
             }).toList();
             try (var stmt = source.prepareStatement("SELECT COUNT(*) FROM information_schema.TRIGGERS WHERE EVENT_OBJECT_SCHEMA=? AND EVENT_OBJECT_TABLE=?")) {

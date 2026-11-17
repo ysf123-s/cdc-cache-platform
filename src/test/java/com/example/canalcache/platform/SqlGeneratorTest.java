@@ -78,14 +78,44 @@ class SqlGeneratorTest {
         assertThatThrownBy(() -> SqlGenerator.generate(event(EventType.DELETE, data("1", "A", "10"), null), foreignKeySchema()))
                 .hasMessageContaining("INSERT/DELETE recovery");
     }
-    @Test void unsupportedGeneratedJsonAndTimezoneSensitiveTypesAreRejected() {
-        for (var col : List.of(new TableSchema.ColumnDefinition("v",2,Types.FLOAT,"FLOAT",10,0,true,false,false),
-                new TableSchema.ColumnDefinition("v",2,Types.LONGVARCHAR,"JSON",255,0,true,false,false),
-                new TableSchema.ColumnDefinition("v",2,Types.TIMESTAMP,"TIMESTAMP",19,0,true,false,false),
+    @Test void generatedAndSpatialColumnsRemainIneligible() {
+        for (var col : List.of(new TableSchema.ColumnDefinition("v",2,Types.BINARY,"GEOMETRY",255,0,true,false,false),
                 new TableSchema.ColumnDefinition("v",2,Types.INTEGER,"INT",10,0,true,false,true))) {
             var unsupported=new TableSchema("s","src","demo_db","inventory","id",List.of(schema().columns().get(0),col));
             assertThat(SqlGenerator.checkEligibility(unsupported).eligible()).isFalse();
         }
+    }
+    @Test void bitValuesNormalizeCanalJdbcBooleanAndUnsigned64Bits() {
+        var bit = new TableSchema.ColumnDefinition("enabled", 1, Types.BIT, "BIT", 1, 0, false, false, false);
+        assertThat(SqlGenerator.formatValue("1", bit)).isEqualTo("1");
+        assertThat(SqlGenerator.valuesEqual("1", true, bit)).isTrue();
+        assertThat(SqlGenerator.valuesEqual("0", new byte[]{0}, bit)).isTrue();
+        assertThatThrownBy(() -> SqlGenerator.formatValue("2", bit)).hasMessageContaining("range");
+        var wide = new TableSchema.ColumnDefinition("flags", 1, Types.BIT, "BIT", 64, 0, false, false, false);
+        assertThat(SqlGenerator.formatValue("-1", wide)).isEqualTo("18446744073709551615");
+        assertThat(SqlGenerator.valuesEqual("-1", new byte[]{-1,-1,-1,-1,-1,-1,-1,-1}, wide)).isTrue();
+    }
+    @Test void timestampUsesExplicitUtcOffsetAndComparesEpochFromPrecheck() {
+        var col = new TableSchema.ColumnDefinition("created_at", 1, Types.TIMESTAMP, "TIMESTAMP", 26, 6, false, false, false);
+        var zone = java.time.ZoneId.of("Asia/Shanghai");
+        assertThat(SqlGenerator.formatValue("2026-10-18 12:00:00.123456", col, zone)).isEqualTo("'2026-10-18 04:00:00.123456+00:00'");
+        var instant = java.time.Instant.parse("2026-10-18T04:00:00.123456Z");
+        var epoch = java.math.BigDecimal.valueOf(instant.getEpochSecond()).add(new java.math.BigDecimal("0.123456"));
+        assertThat(SqlGenerator.valuesEqual("2026-10-18 12:00:00.123456", epoch, col, zone)).isTrue();
+    }
+    @Test void jsonBinaryEnumAndDurationValuesHaveTypedComparison() {
+        var json = new TableSchema.ColumnDefinition("v", 1, Types.LONGVARCHAR, "JSON", 1000, 0, false, false, false);
+        assertThat(SqlGenerator.valuesEqual("{\"a\":1,\"b\":[2]}", "{ \"b\":[2], \"a\":1 }", json)).isTrue();
+        assertThat(SqlGenerator.formatValue("null", json)).contains(" AS JSON)");
+        assertThatThrownBy(() -> SqlGenerator.formatValue("bad json", json)).hasMessageContaining("Invalid JSON");
+        var binary = new TableSchema.ColumnDefinition("v", 1, Types.VARBINARY, "VARBINARY", 10, 0, false, false, false);
+        assertThat(SqlGenerator.formatValue("\0\u00ff'\\", binary)).isEqualTo("X'00ff275c'");
+        assertThat(SqlGenerator.valuesEqual("\0\u00ff", new byte[]{0,-1}, binary)).isTrue();
+        var set = new TableSchema.ColumnDefinition("v", 1, Types.VARCHAR, "SET", 10, 0, false, false, false);
+        assertThat(SqlGenerator.formatValue("-1", set)).isEqualTo("18446744073709551615");
+        var time = new TableSchema.ColumnDefinition("v", 1, Types.TIME, "TIME", 16, 6, false, false, false);
+        assertThat(SqlGenerator.formatValue("-25:03:04.123456", time)).isEqualTo("'-25:03:04.123456'");
+        assertThat(SqlGenerator.valuesEqual("25:00:00", new java.math.BigDecimal("90000"), time)).isTrue();
     }
     @Test void textLiteralRoundTripsQuotesSlashesUnicodeControlCharactersAndSpaces() {
         String value="  你好 '世界' \\ \n\r\t\0 \" ";

@@ -86,7 +86,7 @@ public class RecoveryService {
             return save(archived, null, false, "Current schema differs from the archived snapshot; establish a new baseline", Map.of("schemaCheck", false));
         }
         SqlGenerator.GeneratedSql generated;
-        try { generated = SqlGenerator.generate(archived.event(), schema); }
+        try { generated = SqlGenerator.generate(archived.event(), schema, java.time.ZoneId.of(properties.getBinlogTimeZone())); }
         catch (IllegalArgumentException | java.time.DateTimeException e) {
             return save(archived, null, false, e.getMessage(), Map.of("generationCheck", false));
         }
@@ -97,7 +97,16 @@ public class RecoveryService {
     public RecoveryPlan getPlan(String id) { return store.findPlan(id); }
 
     private PreCheckResult preCheck(ArchivedChange archived, TableSchema schema) {
-        String sql = "SELECT * FROM " + SqlGenerator.quoteIdentifier(schema.table()) + " WHERE "
+        String columns = schema.columns().stream().map(col -> SqlGenerator.isTimestamp(col)
+                ? "UNIX_TIMESTAMP(" + SqlGenerator.quoteIdentifier(col.name()) + ") AS " + SqlGenerator.quoteIdentifier(col.name())
+                : SqlGenerator.isOrdinal(col) || SqlGenerator.isYear(col)
+                ? "CAST(" + SqlGenerator.quoteIdentifier(col.name()) + " AS UNSIGNED) AS " + SqlGenerator.quoteIdentifier(col.name())
+                : col.jdbcType() == java.sql.Types.TINYINT
+                ? "CAST(" + SqlGenerator.quoteIdentifier(col.name()) + " AS SIGNED) AS " + SqlGenerator.quoteIdentifier(col.name())
+                : col.jdbcType() == java.sql.Types.TIME
+                ? "CAST(" + SqlGenerator.quoteIdentifier(col.name()) + " AS CHAR) AS " + SqlGenerator.quoteIdentifier(col.name())
+                : SqlGenerator.quoteIdentifier(col.name())).collect(java.util.stream.Collectors.joining(", "));
+        String sql = "SELECT " + columns + " FROM " + SqlGenerator.quoteIdentifier(schema.table()) + " WHERE "
                 + SqlGenerator.quoteIdentifier(schema.primaryKey()) + " = ?";
         List<Map<String, Object>> rows = businessJdbc.queryForList(sql, archived.summary().primaryKeyValue());
         Map<String, Object> details = new LinkedHashMap<>();
@@ -112,7 +121,7 @@ public class RecoveryService {
             Object actual = row.entrySet().stream().filter(e -> e.getKey().equalsIgnoreCase(col.name())).map(Map.Entry::getValue)
                     .filter(Objects::nonNull).findFirst().orElse(null);
             Object expected = archived.event().getAfterData().get(col.name());
-            if (!SqlGenerator.valuesEqual(expected, actual, col)) {
+            if (!SqlGenerator.valuesEqual(expected, actual, col, java.time.ZoneId.of(properties.getBinlogTimeZone()))) {
                 details.put("conflictColumn", col.name());
                 return new PreCheckResult(false, "Row has been further modified: column " + col.name(), details);
             }

@@ -13,6 +13,7 @@ import java.util.Map;
 public class PlatformProperties {
     private String sourceId = "local-mysql-v1";
     private String database = "demo_db";
+    private String binlogTimeZone = "Asia/Shanghai";
     private String groupId = "platform-change-archive";
     private List<String> tables = new ArrayList<>(List.of("users", "departments"));
     private Map<String, TargetConfig> targets = new LinkedHashMap<>();
@@ -28,6 +29,7 @@ public class PlatformProperties {
     }
 
     public void validate(boolean flatMessage, String cacheGroup) {
+        java.time.ZoneId.of(binlogTimeZone);
         if (sourceId == null || !sourceId.matches("[A-Za-z0-9_-]{1,64}")) {
             throw new IllegalArgumentException("platform.source-id must contain 1-64 letters, digits, '_' or '-'");
         }

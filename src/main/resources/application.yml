@@ -64,6 +64,8 @@ platform:
   enabled: ${PLATFORM_ENABLED:false}
   source-id: ${PLATFORM_SOURCE_ID:local-mysql-v1}
   database: ${MYSQL_DB:demo_db}
+  # Must match the Canal JVM timezone used to render TIMESTAMP binlog values.
+  binlog-time-zone: ${CANAL_BINLOG_TIME_ZONE:Asia/Shanghai}
   group-id: platform-change-archive
   tables: [users, departments, inventory]
   targets:

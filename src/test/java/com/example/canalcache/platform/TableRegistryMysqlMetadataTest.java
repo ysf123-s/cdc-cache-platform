@@ -52,6 +52,7 @@ class TableRegistryMysqlMetadataTest {
         when(charsetResult.next()).thenReturn(true, true, false);
         when(charsetResult.getString(1)).thenReturn("id", "updated_at");
         when(charsetResult.getString(4)).thenReturn("", expression);
+        when(charsetResult.getString(5)).thenReturn("bigint", "datetime");
         when(charset.executeQuery()).thenReturn(charsetResult);
         var triggers = mock(PreparedStatement.class); var triggerResult = mock(ResultSet.class);
         when(triggerResult.next()).thenReturn(true); when(triggers.executeQuery()).thenReturn(triggerResult);

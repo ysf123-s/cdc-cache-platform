@@ -108,4 +108,35 @@ class RecoveryMysqlTest {
         db.execute("CREATE TRIGGER inventory_trigger BEFORE INSERT ON inventory FOR EACH ROW SET NEW.price=1");
         assertThatThrownBy(()->recovery.confirmBaseline("inventory")).hasMessageContaining("triggers");
     }
+    @ParameterizedTest @ValueSource(strings={"imported", "exported"})
+    void foreignKeyBaselineAllowsOrdinaryFieldRecovery(String direction) throws Exception {
+        if ("imported".equals(direction)) {
+            db.execute("CREATE TABLE price_parent(price DECIMAL(30,4) PRIMARY KEY)");
+            db.update("INSERT INTO price_parent VALUES(123456789012345.6789)");
+            db.execute("ALTER TABLE inventory ADD CONSTRAINT fk_inventory_price FOREIGN KEY(price) REFERENCES price_parent(price)");
+        } else {
+            db.execute("ALTER TABLE inventory ADD CONSTRAINT uq_price UNIQUE(price)");
+            db.execute("CREATE TABLE price_child(price DECIMAL(30,4), FOREIGN KEY(price) REFERENCES inventory(price))");
+        }
+        try {
+            baseline=recovery.confirmBaseline("inventory");
+            assertThat(store.findSchema(baseline.snapshotId()).columns().stream().filter(TableSchema.ColumnDefinition::foreignKey)
+                    .map(TableSchema.ColumnDefinition::name)).containsExactly("price");
+            insert("Bob");
+            if ("exported".equals(direction)) db.update("INSERT INTO price_child VALUES(123456789012345.6789)");
+            var plan=recovery.createPlan(event(EventType.UPDATE,"Alice","Bob"));
+            assertThat(plan.executable()).isTrue();
+            assertThat(execute("",plan.generatedSql())).isEqualTo(1);
+            assertThat(db.queryForObject("SELECT name FROM inventory",String.class)).isEqualTo("Alice");
+            db.update("UPDATE inventory SET name='Charlie'");
+            assertThat(execute("",plan.generatedSql())).isZero();
+        } finally {
+            if ("imported".equals(direction)) {
+                db.execute("ALTER TABLE inventory DROP FOREIGN KEY fk_inventory_price");
+                db.execute("DROP TABLE price_parent");
+            } else {
+                db.execute("DROP TABLE price_child");
+            }
+        }
+    }
 }

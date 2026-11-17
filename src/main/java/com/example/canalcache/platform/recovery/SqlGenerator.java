@@ -1,5 +1,6 @@
 package com.example.canalcache.platform.recovery;
 
+import com.alibaba.otter.canal.protocol.CanalEntry.EventType;
 import com.example.canalcache.model.BinlogEvent;
 import com.example.canalcache.platform.history.TableSchema;
 import java.math.BigDecimal;
@@ -38,6 +39,10 @@ public class SqlGenerator {
             throw new IllegalArgumentException("Event does not match its schema snapshot");
         }
         if (event.getEventType() == null || event.isDdl()) throw new IllegalArgumentException("Not a recoverable row event");
+        if (event.getEventType() != EventType.UPDATE
+                && schema.columns().stream().anyMatch(TableSchema.ColumnDefinition::foreignKey)) {
+            throw new IllegalArgumentException("INSERT/DELETE recovery is not supported for tables with foreign keys");
+        }
         switch (event.getEventType()) {
             case INSERT -> requireFull(event.getAfterData(), schema, "after");
             case DELETE -> requireFull(event.getBeforeData(), schema, "before");
@@ -48,6 +53,11 @@ public class SqlGenerator {
                 }
                 requireFull(event.getBeforeData(), schema, "before");
                 requireFull(event.getAfterData(), schema, "after");
+                for (var col : schema.columns()) {
+                    if (col.foreignKey() && !valuesEqual(event.getBeforeData().get(col.name()), event.getAfterData().get(col.name()), col)) {
+                        throw new IllegalArgumentException("Foreign key column modification is not supported for recovery: " + col.name());
+                    }
+                }
             }
             default -> throw new IllegalArgumentException("Unsupported event type for recovery");
         }

@@ -51,6 +51,33 @@ class SqlGeneratorTest {
         assertThatThrownBy(()->SqlGenerator.generate(event(EventType.UPDATE,data("1","A","1"),data("2","A","1")),schema()))
                 .hasMessageContaining("Primary key modification");
     }
+    private TableSchema foreignKeySchema() {
+        var original = schema();
+        var price = original.columns().get(2);
+        return new TableSchema(original.snapshotId(), original.sourceId(), original.database(), original.table(), original.primaryKey(),
+                List.of(original.columns().get(0), original.columns().get(1),
+                        new TableSchema.ColumnDefinition(price.name(), price.ordinal(), price.jdbcType(), price.typeName(), price.size(),
+                                price.scale(), price.nullable(), price.autoIncrement(), price.generated(), null, null, true)));
+    }
+    @Test void foreignKeyTableAllowsOrdinaryUpdateAndTypedEqualKeyValues() {
+        var schema = foreignKeySchema();
+        assertThat(SqlGenerator.checkEligibility(schema).eligible()).isTrue();
+        String sql = SqlGenerator.generate(event(EventType.UPDATE, data("1", "Alice", "10.0"), data("1", "Bob", "10.00")), schema).sql();
+        assertThat(sql.substring(sql.indexOf(" SET "), sql.indexOf(" WHERE "))).contains("`name`").doesNotContain("`price`");
+        assertThat(sql).contains("`price` = 10.00", "LIMIT 1;");
+    }
+    @Test void changingForeignKeyColumnIncludingNullTransitionsIsRejected() {
+        for (String[] values : List.of(new String[]{"10", "20"}, new String[]{null, "10"}, new String[]{"10", null})) {
+            assertThatThrownBy(() -> SqlGenerator.generate(event(EventType.UPDATE, data("1", "A", values[0]), data("1", "A", values[1])), foreignKeySchema()))
+                    .hasMessageContaining("Foreign key column modification").hasMessageContaining("price");
+        }
+    }
+    @Test void insertAndDeleteRecoveryOnForeignKeyTablesRemainRejected() {
+        assertThatThrownBy(() -> SqlGenerator.generate(event(EventType.INSERT, null, data("1", "A", "10")), foreignKeySchema()))
+                .hasMessageContaining("INSERT/DELETE recovery");
+        assertThatThrownBy(() -> SqlGenerator.generate(event(EventType.DELETE, data("1", "A", "10"), null), foreignKeySchema()))
+                .hasMessageContaining("INSERT/DELETE recovery");
+    }
     @Test void unsupportedGeneratedJsonAndTimezoneSensitiveTypesAreRejected() {
         for (var col : List.of(new TableSchema.ColumnDefinition("v",2,Types.FLOAT,"FLOAT",10,0,true,false,false),
                 new TableSchema.ColumnDefinition("v",2,Types.LONGVARCHAR,"JSON",255,0,true,false,false),

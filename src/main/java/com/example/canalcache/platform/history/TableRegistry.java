@@ -12,6 +12,8 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.HashSet;
+import java.util.Set;
 
 public class TableRegistry {
     private final PlatformProperties properties;
@@ -56,11 +58,12 @@ public class TableRegistry {
         if (!List.of(Types.BIGINT, Types.INTEGER, Types.SMALLINT, Types.TINYINT, Types.VARCHAR, Types.CHAR).contains(key.jdbcType())
                 || key.size() > 255) throw new IllegalArgumentException("Unsupported primary key type/size for table " + table);
         List<String> restrictions = new ArrayList<>();
+        Set<String> foreignKeyColumns = new HashSet<>();
         try (ResultSet rs = metadata.getImportedKeys(source.getCatalog(), null, table)) {
-            if (rs.next()) restrictions.add("Table has foreign keys");
+            while (rs.next()) foreignKeyColumns.add(rs.getString("FKCOLUMN_NAME"));
         }
         try (ResultSet rs = metadata.getExportedKeys(source.getCatalog(), null, table)) {
-            if (rs.next()) restrictions.add("Table is referenced by foreign keys");
+            while (rs.next()) foreignKeyColumns.add(rs.getString("PKCOLUMN_NAME"));
         }
         if ("MySQL".equals(metadata.getDatabaseProductName())) {
             String currentUser;
@@ -98,6 +101,9 @@ public class TableRegistry {
                 try (ResultSet rs = stmt.executeQuery()) { rs.next(); if (rs.getLong(1) > 0) restrictions.add("Table has triggers"); }
             }
         }
+        columns = columns.stream().map(c -> new TableSchema.ColumnDefinition(c.name(), c.ordinal(), c.jdbcType(),
+                c.typeName(), c.size(), c.scale(), c.nullable(), c.autoIncrement(), c.generated(),
+                c.characterSet(), c.collation(), foreignKeyColumns.contains(c.name()))).toList();
         String restriction = restrictions.isEmpty() ? null : String.join("; ", restrictions);
         String id = EventIdentity.hash(store.encode(List.of("schema-v2", properties.getSourceId(), properties.getDatabase(),
                 table, keys.get(0), columns, restrictions)));

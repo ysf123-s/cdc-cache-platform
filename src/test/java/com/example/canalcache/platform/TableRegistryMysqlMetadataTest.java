@@ -36,7 +36,10 @@ class TableRegistryMysqlMetadataTest {
         var pk = mock(ResultSet.class); when(pk.next()).thenReturn(true, false);
         when(pk.getString("COLUMN_NAME")).thenReturn("id");
         when(metadata.getPrimaryKeys(anyString(), isNull(), anyString())).thenReturn(pk);
-        when(metadata.getImportedKeys(anyString(), isNull(), anyString())).thenReturn(mock(ResultSet.class));
+        var imported = mock(ResultSet.class);
+        when(imported.next()).thenReturn(true, false);
+        when(imported.getString("FKCOLUMN_NAME")).thenReturn("id");
+        when(metadata.getImportedKeys(anyString(), isNull(), anyString())).thenReturn(imported);
         when(metadata.getExportedKeys(anyString(), isNull(), anyString())).thenReturn(mock(ResultSet.class));
         var currentUser = mock(ResultSet.class); when(currentUser.next()).thenReturn(true);
         when(currentUser.getString(1)).thenReturn("root@%");
@@ -57,6 +60,8 @@ class TableRegistryMysqlMetadataTest {
         when(connection.prepareStatement(startsWith("SELECT COUNT(*) FROM information_schema.TRIGGERS"))).thenReturn(triggers);
 
         var schema = TableRegistry.inspect(properties, store, connection, "inventory");
+        assertThat(schema.columns().get(0).foreignKey()).isTrue();
+        assertThat(schema.columns().get(1).foreignKey()).isFalse();
         assertThat(schema.columns().get(1).generated()).isEqualTo(!expression.isEmpty());
         assertThat(SqlGenerator.checkEligibility(schema).eligible()).isEqualTo(expression.isEmpty());
     }

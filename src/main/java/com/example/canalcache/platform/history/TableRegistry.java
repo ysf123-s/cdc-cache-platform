@@ -8,9 +8,11 @@ import java.sql.DatabaseMetaData;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Types;
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.HashSet;
 import java.util.Set;
@@ -59,6 +61,7 @@ public class TableRegistry {
                 || key.size() > 255) throw new IllegalArgumentException("Unsupported primary key type/size for table " + table);
         List<String> restrictions = new ArrayList<>();
         Set<String> foreignKeyColumns = new HashSet<>();
+        Set<String> autoUpdatedColumns = new HashSet<>();
         try (ResultSet rs = metadata.getImportedKeys(source.getCatalog(), null, table)) {
             while (rs.next()) foreignKeyColumns.add(rs.getString("FKCOLUMN_NAME"));
         }
@@ -83,10 +86,16 @@ public class TableRegistry {
                 }
             }
             Map<String, String[]> text = new LinkedHashMap<>();
-            try (var stmt = source.prepareStatement("SELECT COLUMN_NAME,CHARACTER_SET_NAME,COLLATION_NAME,GENERATION_EXPRESSION,COLUMN_TYPE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=? AND TABLE_NAME=?")) {
+            try (var stmt = source.prepareStatement("SELECT COLUMN_NAME,CHARACTER_SET_NAME,COLLATION_NAME,GENERATION_EXPRESSION,COLUMN_TYPE,EXTRA FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=? AND TABLE_NAME=?")) {
                 stmt.setString(1, source.getCatalog()); stmt.setString(2, table);
                 try (ResultSet rs = stmt.executeQuery()) {
-                    while (rs.next()) text.put(rs.getString(1), new String[]{rs.getString(2), rs.getString(3), rs.getString(4), rs.getString(5)});
+                    while (rs.next()) {
+                        String name = rs.getString(1);
+                        text.put(name, new String[]{rs.getString(2), rs.getString(3), rs.getString(4), rs.getString(5)});
+                        if (rs.getString(6).toLowerCase(Locale.ROOT).contains("on update current_timestamp")) {
+                            autoUpdatedColumns.add(name);
+                        }
+                    }
                 }
             }
             columns = columns.stream().map(c -> {
@@ -110,7 +119,8 @@ public class TableRegistry {
         String restriction = restrictions.isEmpty() ? null : String.join("; ", restrictions);
         String id = EventIdentity.hash(store.encode(List.of("schema-v2", properties.getSourceId(), properties.getDatabase(),
                 table, keys.get(0), columns, restrictions)));
-        return new TableSchema(id, properties.getSourceId(), properties.getDatabase(), table, keys.get(0), columns, restriction);
+        return new TableSchema(id, properties.getSourceId(), properties.getDatabase(), table, keys.get(0), columns, restriction,
+                Set.copyOf(autoUpdatedColumns));
     }
 
     public void refresh(TableSchema schema) { tables.put(schema.table(), schema); }
@@ -138,8 +148,9 @@ public class TableRegistry {
     }
 
     public List<TableView> views() {
+        ZoneId binlogTimeZone = ZoneId.of(properties.getBinlogTimeZone());
         return properties.getTables().stream().map(tables::get).map(schema -> {
-            ArchivedChange.Recovery recovery = store.recoveryState(schema, null);
+            ArchivedChange.Recovery recovery = store.recoveryState(schema, null, binlogTimeZone);
             return new TableView(schema, store.invalidationReason(schema.snapshotId()), recovery.available(), recovery.reason());
         }).toList();
     }

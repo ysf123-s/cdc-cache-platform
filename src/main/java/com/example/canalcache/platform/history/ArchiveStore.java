@@ -18,6 +18,7 @@ import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.sql.ResultSet;
+import java.time.ZoneId;
 import java.sql.SQLException;
 import java.util.List;
 
@@ -105,7 +106,7 @@ public class ArchiveStore {
         });
     }
 
-    public ArchivedChange.Recovery recoveryState(TableSchema schema, BinlogEvent event) {
+    public ArchivedChange.Recovery recoveryState(TableSchema schema, BinlogEvent event, ZoneId binlogTimeZone) {
         if (schema == null) return new ArchivedChange.Recovery(false, "Schema snapshot not found");
         String invalidation = invalidationReason(schema.snapshotId());
         if (invalidation != null) return new ArchivedChange.Recovery(false, "Schema snapshot invalidated by DDL: " + invalidation);
@@ -117,7 +118,7 @@ public class ArchiveStore {
         }
         if (event != null) {
             if (!baseline.covers(event)) return new ArchivedChange.Recovery(false, "Event precedes the verified recovery baseline");
-            try { SqlGenerator.validateEvent(event, schema); }
+            try { SqlGenerator.validateEvent(event, schema, binlogTimeZone); }
             catch (IllegalArgumentException | java.time.DateTimeException e) { return new ArchivedChange.Recovery(false, e.getMessage()); }
         }
         return new ArchivedChange.Recovery(true, "Eligible for a current-state pre-check; not proof of safe execution");
@@ -174,7 +175,8 @@ public class ArchiveStore {
                     BinlogEvent event = decode(rs.getString("event_json"), BinlogEvent.class);
                     return new ArchivedChange(summary(rs), event, rs.getString("kafka_topic"),
                             rs.getInt("kafka_partition"), Long.toString(rs.getLong("kafka_offset")),
-                            ArchiveService.differences(event), recoveryState(findSchema(rs.getString("schema_snapshot_id")), event));
+                            ArchiveService.differences(event), recoveryState(findSchema(rs.getString("schema_snapshot_id")), event,
+                                    ZoneId.of(properties.getBinlogTimeZone())));
                 });
         return rows.isEmpty() ? null : rows.get(0);
     }

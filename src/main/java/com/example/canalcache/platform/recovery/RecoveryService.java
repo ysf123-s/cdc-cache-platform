@@ -7,7 +7,9 @@ import org.springframework.jdbc.core.ConnectionCallback;
 import org.springframework.jdbc.core.JdbcTemplate;
 import java.sql.DatabaseMetaData;
 import java.sql.SQLException;
+import java.time.DateTimeException;
 import java.time.Instant;
+import java.time.ZoneId;
 import java.util.*;
 
 public class RecoveryService {
@@ -65,9 +67,9 @@ public class RecoveryService {
         ArchivedChange archived = store.find(eventId, properties);
         if (archived == null) throw new NoSuchElementException("Archived change event not found: " + eventId);
         var summary = archived.summary();
-        TableSchema schema = store.findSchema(summary.schemaSnapshotId());
-        ArchivedChange.Recovery eligibility = store.recoveryState(schema, archived.event());
+        ArchivedChange.Recovery eligibility = archived.recovery();
         if (!eligibility.available()) return save(archived, null, false, eligibility.reason(), Map.of("eligibility", eligibility.reason()));
+        TableSchema schema = store.findSchema(summary.schemaSnapshotId());
         TableSchema current;
         try {
             current = businessJdbc.execute((ConnectionCallback<TableSchema>) connection -> {
@@ -85,34 +87,37 @@ public class RecoveryService {
         if (!schema.snapshotId().equals(current.snapshotId())) {
             return save(archived, null, false, "Current schema differs from the archived snapshot; establish a new baseline", Map.of("schemaCheck", false));
         }
+        ZoneId binlogTimeZone = ZoneId.of(properties.getBinlogTimeZone());
         SqlGenerator.GeneratedSql generated;
-        try { generated = SqlGenerator.generate(archived.event(), schema, java.time.ZoneId.of(properties.getBinlogTimeZone())); }
-        catch (IllegalArgumentException | java.time.DateTimeException e) {
+        try { generated = SqlGenerator.generate(archived.event(), current, binlogTimeZone); }
+        catch (IllegalArgumentException | DateTimeException e) {
             return save(archived, null, false, e.getMessage(), Map.of("generationCheck", false));
         }
-        PreCheckResult check = preCheck(archived, schema);
+        PreCheckResult check = preCheck(archived, current, binlogTimeZone);
         return save(archived, generated.sql(), check.matched(), check.reason(), check.details());
     }
 
     public RecoveryPlan getPlan(String id) { return store.findPlan(id); }
 
-    private PreCheckResult preCheck(ArchivedChange archived, TableSchema schema) {
-        String columns = schema.columns().stream().map(col -> SqlGenerator.isTimestamp(col)
-                ? "UNIX_TIMESTAMP(" + SqlGenerator.quoteIdentifier(col.name()) + ") AS " + SqlGenerator.quoteIdentifier(col.name())
-                : SqlGenerator.isOrdinal(col) || SqlGenerator.isYear(col)
-                ? "CAST(" + SqlGenerator.quoteIdentifier(col.name()) + " AS UNSIGNED) AS " + SqlGenerator.quoteIdentifier(col.name())
-                : col.jdbcType() == java.sql.Types.TINYINT
-                ? "CAST(" + SqlGenerator.quoteIdentifier(col.name()) + " AS SIGNED) AS " + SqlGenerator.quoteIdentifier(col.name())
-                : col.jdbcType() == java.sql.Types.TIME
-                ? "CAST(" + SqlGenerator.quoteIdentifier(col.name()) + " AS CHAR) AS " + SqlGenerator.quoteIdentifier(col.name())
-                : SqlGenerator.quoteIdentifier(col.name())).collect(java.util.stream.Collectors.joining(", "));
+    private PreCheckResult preCheck(ArchivedChange archived, TableSchema schema, ZoneId binlogTimeZone) {
+        boolean restoreDeletedRow = "DELETE".equals(archived.summary().operation());
+        Map<String, Object> after = archived.event().getAfterData();
+        String columns = restoreDeletedRow ? "1" : schema.columns().stream().map(col -> {
+            String name = SqlGenerator.quoteIdentifier(col.name());
+            if (SqlGenerator.isJson(col)) return "CASE WHEN " + SqlGenerator.jsonGuard(name, after.get(col.name())) + " THEN 1 ELSE 0 END AS " + name;
+            if (SqlGenerator.isTimestamp(col)) return "UNIX_TIMESTAMP(" + name + ") AS " + name;
+            if (SqlGenerator.isOrdinal(col) || SqlGenerator.isYear(col)) return "CAST(" + name + " AS UNSIGNED) AS " + name;
+            if (col.jdbcType() == java.sql.Types.TINYINT) return "CAST(" + name + " AS SIGNED) AS " + name;
+            if (col.jdbcType() == java.sql.Types.TIME) return "CAST(" + name + " AS CHAR) AS " + name;
+            return name;
+        }).collect(java.util.stream.Collectors.joining(", "));
         String sql = "SELECT " + columns + " FROM " + SqlGenerator.quoteIdentifier(schema.table()) + " WHERE "
                 + SqlGenerator.quoteIdentifier(schema.primaryKey()) + " = ?";
         List<Map<String, Object>> rows = businessJdbc.queryForList(sql, archived.summary().primaryKeyValue());
         Map<String, Object> details = new LinkedHashMap<>();
         details.put("checkedAt", Instant.now().toString());
         details.put("warning", "Read-only snapshot; later writes and business constraints still require review");
-        if ("DELETE".equals(archived.summary().operation())) {
+        if (restoreDeletedRow) {
             return new PreCheckResult(rows.isEmpty(), rows.isEmpty() ? "Pre-check passed; review before execution" : "Primary key conflict: target row exists", details);
         }
         if (rows.isEmpty()) return new PreCheckResult(false, "Target row not found", details);
@@ -120,8 +125,9 @@ public class RecoveryService {
         for (var col : schema.columns()) {
             Object actual = row.entrySet().stream().filter(e -> e.getKey().equalsIgnoreCase(col.name())).map(Map.Entry::getValue)
                     .filter(Objects::nonNull).findFirst().orElse(null);
-            Object expected = archived.event().getAfterData().get(col.name());
-            if (!SqlGenerator.valuesEqual(expected, actual, col, java.time.ZoneId.of(properties.getBinlogTimeZone()))) {
+            boolean matched = SqlGenerator.isJson(col) ? actual instanceof Number number && number.intValue() == 1
+                    : SqlGenerator.valuesEqual(after.get(col.name()), actual, col, binlogTimeZone);
+            if (!matched) {
                 details.put("conflictColumn", col.name());
                 return new PreCheckResult(false, "Row has been further modified: column " + col.name(), details);
             }

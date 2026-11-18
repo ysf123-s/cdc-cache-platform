@@ -11,6 +11,7 @@ import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
 import java.sql.Types;
+import java.time.DateTimeException;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.Instant;
@@ -46,7 +47,7 @@ public class SqlGenerator {
                 : new Eligibility(false, "Table contains unsupported column types: " + String.join(", ", unsupported), unsupported);
     }
 
-    public static void validateEvent(BinlogEvent event, TableSchema schema) {
+    public static void validateEvent(BinlogEvent event, TableSchema schema, ZoneId binlogTimeZone) {
         Eligibility eligibility = checkEligibility(schema);
         if (!eligibility.eligible()) throw new IllegalArgumentException(eligibility.reason());
         if (!schema.table().equals(event.getTableName()) || !schema.database().equals(event.getDatabaseName())) {
@@ -58,17 +59,17 @@ public class SqlGenerator {
             throw new IllegalArgumentException("INSERT/DELETE recovery is not supported for tables with foreign keys");
         }
         switch (event.getEventType()) {
-            case INSERT -> requireFull(event.getAfterData(), schema, "after");
-            case DELETE -> requireFull(event.getBeforeData(), schema, "before");
+            case INSERT -> requireFull(event.getAfterData(), schema, "after", binlogTimeZone);
+            case DELETE -> requireFull(event.getBeforeData(), schema, "before", binlogTimeZone);
             case UPDATE -> {
                 if (event.getBeforeData() != null && event.getAfterData() != null
                         && !Objects.equals(event.getBeforeData().get(schema.primaryKey()), event.getAfterData().get(schema.primaryKey()))) {
                     throw new IllegalArgumentException("Primary key modification is not supported for recovery");
                 }
-                requireFull(event.getBeforeData(), schema, "before");
-                requireFull(event.getAfterData(), schema, "after");
+                requireFull(event.getBeforeData(), schema, "before", binlogTimeZone);
+                requireFull(event.getAfterData(), schema, "after", binlogTimeZone);
                 for (var col : schema.columns()) {
-                    if (col.foreignKey() && !valuesEqual(event.getBeforeData().get(col.name()), event.getAfterData().get(col.name()), col)) {
+                    if (col.foreignKey() && !valuesEqual(event.getBeforeData().get(col.name()), event.getAfterData().get(col.name()), col, binlogTimeZone)) {
                         throw new IllegalArgumentException("Foreign key column modification is not supported for recovery: " + col.name());
                     }
                 }
@@ -77,14 +78,24 @@ public class SqlGenerator {
         }
     }
 
-    private static void requireFull(Map<String, Object> data, TableSchema schema, String side) {
+    private static void requireFull(Map<String, Object> data, TableSchema schema, String side, ZoneId binlogTimeZone) {
         Set<String> expected = new LinkedHashSet<>();
         schema.columns().forEach(col -> expected.add(col.name()));
         if (data == null || !data.keySet().equals(expected)) throw new IllegalArgumentException("Incomplete " + side + " image; FULL columns required");
         for (var col : schema.columns()) {
             Object value = data.get(col.name());
             if (value == null && !col.nullable()) throw new IllegalArgumentException("NULL in required column " + col.name());
-            formatValue(value, col);
+            if (value != null && isJson(col)) {
+                validateJsonNumbers(json(value), col.name());
+            } else if (value instanceof String && isTimestamp(col)) {
+                LocalDateTime time = dateTime(value);
+                if (binlogTimeZone.getRules().getValidOffsets(time).size() != 1) {
+                    throw new DateTimeException("TIMESTAMP has no unique UTC value in Canal time zone " + binlogTimeZone
+                            + ": " + col.name() + " = " + value);
+                }
+            } else {
+                formatValue(value, col, binlogTimeZone);
+            }
         }
     }
 
@@ -93,7 +104,7 @@ public class SqlGenerator {
     }
 
     public static GeneratedSql generate(BinlogEvent event, TableSchema schema, ZoneId binlogTimeZone) {
-        validateEvent(event, schema);
+        validateEvent(event, schema, binlogTimeZone);
         String table = quoteIdentifier(schema.database()) + "." + quoteIdentifier(schema.table());
         String sql;
         String reverse;
@@ -105,13 +116,19 @@ public class SqlGenerator {
             case UPDATE -> {
                 reverse = "UPDATE";
                 List<String> sets = new ArrayList<>();
+                List<String> preserve = new ArrayList<>();
                 for (var col : schema.columns()) {
-                    if (!col.name().equals(schema.primaryKey()) && (isTimestamp(col)
-                            || !valuesEqual(event.getBeforeData().get(col.name()), event.getAfterData().get(col.name()), col, binlogTimeZone))) {
-                        sets.add(quoteIdentifier(col.name()) + " = " + formatValue(event.getBeforeData().get(col.name()), col, binlogTimeZone));
+                    if (col.name().equals(schema.primaryKey())) continue;
+                    Object before = event.getBeforeData().get(col.name());
+                    String name = quoteIdentifier(col.name());
+                    if (!valuesEqual(before, event.getAfterData().get(col.name()), col, binlogTimeZone)) {
+                        sets.add(name + " = " + formatValue(before, col, binlogTimeZone));
+                    } else if (schema.autoUpdatedColumns().contains(col.name())) {
+                        preserve.add(name + " = " + name);
                     }
                 }
                 if (sets.isEmpty()) throw new IllegalArgumentException("No column changes detected in UPDATE event");
+                sets.addAll(preserve);
                 sql = "UPDATE " + table + " SET " + String.join(", ", sets) + " WHERE " + guard(event.getAfterData(), schema, binlogTimeZone) + " LIMIT 1;";
             }
             case DELETE -> {
@@ -136,6 +153,7 @@ public class SqlGenerator {
             Object value = data.get(col.name());
             String name = quoteIdentifier(col.name());
             if (value == null) conditions.add(name + " IS NULL");
+            else if (isJson(col)) conditions.add(jsonGuard(name, value));
             else if (isTimestamp(col)) conditions.add("UNIX_TIMESTAMP(" + name + ") = " + epochSeconds(timestamp(value, binlogTimeZone)).toPlainString());
             else if (isOrdinal(col) || isYear(col)) conditions.add("CAST(" + name + " AS UNSIGNED) = " + formatValue(value, col));
             else if (col.jdbcType() == Types.TIME) conditions.add(name + " = CAST(" + formatValue(value, col) + " AS TIME(6))");
@@ -158,7 +176,7 @@ public class SqlGenerator {
         String str = value.toString();
         if (isJson(col)) {
             json(value);
-            return "CAST(CONVERT(X'" + hex(str) + "' USING utf8mb4) AS JSON)";
+            return jsonLiteral(value);
         }
         if (isOrdinal(col)) return ordinal(value, col).toString();
         if (isYear(col)) {
@@ -243,8 +261,15 @@ public class SqlGenerator {
     public static boolean isYear(TableSchema.ColumnDefinition col) {
         return col.typeName().toUpperCase(Locale.ROOT).startsWith("YEAR");
     }
-    private static boolean isJson(TableSchema.ColumnDefinition col) {
+    static boolean isJson(TableSchema.ColumnDefinition col) {
         return col.typeName().equalsIgnoreCase("JSON");
+    }
+    static String jsonGuard(String name, Object value) {
+        return value == null ? name + " IS NULL"
+                : "CAST(" + name + " AS BINARY) = CAST(" + jsonLiteral(value) + " AS BINARY)";
+    }
+    private static String jsonLiteral(Object value) {
+        return "CAST(CONVERT(X'" + hex(value.toString()) + "' USING utf8mb4) AS JSON)";
     }
     private static boolean singlePrecision(TableSchema.ColumnDefinition col) {
         return col.typeName().toUpperCase(Locale.ROOT).startsWith("FLOAT") || col.jdbcType() == Types.REAL;
@@ -265,6 +290,21 @@ public class SqlGenerator {
             return result;
         } catch (JsonProcessingException error) {
             throw new IllegalArgumentException("Invalid JSON value", error);
+        }
+    }
+    private static void validateJsonNumbers(JsonNode value, String column) {
+        if (value.isIntegralNumber()) {
+            BigInteger number = value.bigIntegerValue();
+            if (number.bitLength() > (number.signum() < 0 ? 63 : 64)) {
+                throw new IllegalArgumentException("JSON number cannot be restored without precision loss: " + column);
+            }
+        } else if (value.isFloatingPointNumber()) {
+            double number = value.doubleValue();
+            if (!Double.isFinite(number) || BigDecimal.valueOf(number).compareTo(value.decimalValue()) != 0) {
+                throw new IllegalArgumentException("JSON number cannot be restored without precision loss: " + column);
+            }
+        } else {
+            for (JsonNode child : value) validateJsonNumbers(child, column);
         }
     }
     private static BigDecimal timeSeconds(Object value) {

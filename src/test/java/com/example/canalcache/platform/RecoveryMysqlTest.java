@@ -121,8 +121,8 @@ class RecoveryMysqlTest {
                 new TypeCase("TINYINT(1)", "2", "3", "2", "3"),
                 new TypeCase("FLOAT", "CAST(0.1 AS FLOAT)", "CAST(0.2 AS FLOAT)", "0.1", "0.2"),
                 new TypeCase("DOUBLE", "CAST(0.10000000000000002 AS DOUBLE)", "CAST(0.2 AS DOUBLE)", "0.10000000000000002", "0.2"),
-                new TypeCase("JSON", "CAST('{\"a\":1,\"s\":\"中文\"}' AS JSON)", "CAST('{\"b\":[2,3],\"a\":2}' AS JSON)",
-                        "{\"s\":\"中文\",\"a\":1}", "{ \"a\":2, \"b\":[2,3] }"),
+                new TypeCase("JSON", "CAST('{\"a\":0.1,\"s\":\"中文\"}' AS JSON)", "CAST('{\"b\":[2,3],\"a\":2}' AS JSON)",
+                        "{\"s\":\"中文\",\"a\":0.1}", "{ \"a\":2, \"b\":[2,3] }"),
                 new TypeCase("JSON", "CAST('null' AS JSON)", "CAST('[1,true]' AS JSON)", "null", "[1,true]"),
                 new TypeCase("ENUM('新建','完成')", "'新建'", "'完成'", "1", "2"),
                 new TypeCase("SET('red','blue','green')", "'red,blue'", "'green'", "3", "4"),
@@ -181,6 +181,33 @@ class RecoveryMysqlTest {
         assertThat(execute("", delete.generatedSql())).isEqualTo(1);
     }
 
+    @Test void jsonRecoveryRejectsPrecisionLossInNestedNumber() throws Exception {
+        configureTypesTable("v JSON");
+        db.execute("INSERT INTO inventory VALUES(1, JSON_OBJECT('prices', JSON_ARRAY(CAST('12345678901234567890.123456' AS DECIMAL(26,6)))))");
+        assertThat(db.queryForObject("SELECT JSON_TYPE(v -> '$.prices[0]') FROM inventory", String.class)).isEqualTo("DECIMAL");
+        db.execute("UPDATE inventory SET v = JSON_OBJECT('prices', JSON_ARRAY(0))");
+        var plan = recovery.createPlan(typeEvent(EventType.UPDATE,
+                "{\"prices\":[12345678901234567890.123456]}", "{\"prices\":[0]}", 1));
+        assertThat(plan.executable()).isFalse();
+        assertThat(plan.reason()).contains("without precision loss");
+        assertThat(plan.generatedSql()).startsWith("-- Recovery SQL unavailable");
+    }
+
+    @Test void jsonRecoveryPreCheckAndGuardDetectLaterFloatingPointValue() throws Exception {
+        configureTypesTable("v JSON");
+        db.execute("INSERT INTO inventory VALUES(1, JSON_OBJECT('count', 1))");
+        String id = typeEvent(EventType.UPDATE, "{\"count\":0}", "{\"count\":1}", 1);
+        var plan = recovery.createPlan(id);
+        assertThat(plan.executable()).describedAs(plan.reason()).isTrue();
+        db.execute("UPDATE inventory SET v = JSON_OBJECT('count', 2)");
+        db.execute("UPDATE inventory SET v = JSON_OBJECT('count', CAST(1 AS DOUBLE))");
+        assertThat(db.queryForObject("SELECT JSON_TYPE(v -> '$.count') FROM inventory", String.class)).isEqualTo("DOUBLE");
+        assertThat(execute("", plan.generatedSql())).isZero();
+        var newPlan = recovery.createPlan(id);
+        assertThat(newPlan.executable()).isFalse();
+        assertThat(newPlan.reason()).contains("column v");
+    }
+
     private void assertRestoredValue(TypeCase sample) {
         if (sample.type().startsWith("TIMESTAMP")) {
             var expected = java.math.BigDecimal.valueOf(java.time.Instant.parse("2026-10-18T04:00:00Z").getEpochSecond())
@@ -209,13 +236,29 @@ class RecoveryMysqlTest {
         }
     }
 
-    @Test void ordinaryFieldRecoveryPreservesAnUnchangedAutoUpdateTimestamp() throws Exception {
-        configureTypesTable("v TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6), note VARCHAR(20)");
-        db.execute("INSERT INTO inventory VALUES(1,'2026-10-18 12:00:00.123456+08:00','new')");
+    @ParameterizedTest @ValueSource(strings = {"2025-11-02 01:30:00", "2025-03-09 02:30:00"})
+    void timestampRecoveryRejectsLocalTimeWithoutUniqueUtcValue(String before) throws Exception {
+        properties.setBinlogTimeZone("America/New_York");
+        configureTypesTable("v TIMESTAMP(6)");
+        db.execute("INSERT INTO inventory VALUES(1,'2025-11-02 08:00:00+00:00')");
+        String id = typeEvent(EventType.UPDATE, before, "2025-11-02 03:00:00", 1);
+        assertThat(store.find(id, properties).recovery().available()).isFalse();
+        var plan = recovery.createPlan(id);
+        assertThat(plan.executable()).isFalse();
+        assertThat(plan.reason()).contains("TIMESTAMP has no unique UTC value", "America/New_York", before);
+        assertThat(plan.generatedSql()).startsWith("-- Recovery SQL unavailable");
+    }
+
+    @ParameterizedTest @ValueSource(strings = {"TIMESTAMP", "DATETIME"})
+    void ordinaryFieldRecoveryPreservesAnUnchangedAutoUpdateTime(String type) throws Exception {
+        configureTypesTable("v " + type + "(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6), note VARCHAR(20)");
+        String before = "2026-10-18 12:00:00.123456";
+        String literal = type.equals("TIMESTAMP") ? before + "+08:00" : before;
+        db.execute("INSERT INTO inventory VALUES(1,'" + literal + "','new')");
         var row = CanalEntry.RowData.newBuilder();
         for (boolean after : List.of(false, true)) {
             var values = List.of(column("id", "1", 0, Types.BIGINT, "bigint", true),
-                    column("v", "2026-10-18 12:00:00.123456", 1, Types.TIMESTAMP, "timestamp(6)", false),
+                    column("v", before, 1, Types.TIMESTAMP, type + "(6)", false),
                     column("note", after ? "new" : "old", 2, Types.VARCHAR, "varchar(20)", false));
             if (after) row.addAllAfterColumns(values); else row.addAllBeforeColumns(values);
         }
@@ -227,11 +270,16 @@ class RecoveryMysqlTest {
         String id = store.search(properties, new ArchivedChange.Filter(null,null,null,null,null,null,1)).items().get(0).eventId();
         var plan = recovery.createPlan(id);
         assertThat(plan.executable()).describedAs(plan.reason()).isTrue();
+        assertThat(plan.generatedSql()).contains("`v` = `v`");
         assertThat(execute("", plan.generatedSql())).isEqualTo(1);
         assertThat(db.queryForObject("SELECT note FROM inventory", String.class)).isEqualTo("old");
-        assertThat(db.queryForObject("SELECT UNIX_TIMESTAMP(v) FROM inventory", java.math.BigDecimal.class))
-                .isEqualByComparingTo(java.math.BigDecimal.valueOf(java.time.Instant.parse("2026-10-18T04:00:00Z").getEpochSecond())
-                        .add(new java.math.BigDecimal("0.123456")));
+        if (type.equals("TIMESTAMP")) {
+            assertThat(db.queryForObject("SELECT UNIX_TIMESTAMP(v) FROM inventory", java.math.BigDecimal.class))
+                    .isEqualByComparingTo(java.math.BigDecimal.valueOf(java.time.Instant.parse("2026-10-18T04:00:00Z").getEpochSecond())
+                            .add(new java.math.BigDecimal("0.123456")));
+        } else {
+            assertThat(db.queryForObject("SELECT CAST(v AS CHAR) FROM inventory", String.class)).isEqualTo(before);
+        }
     }
     @ParameterizedTest @ValueSource(strings={"imported", "exported"})
     void foreignKeyBaselineAllowsOrdinaryFieldRecovery(String direction) throws Exception {

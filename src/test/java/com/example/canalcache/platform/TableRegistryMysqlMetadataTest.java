@@ -53,6 +53,7 @@ class TableRegistryMysqlMetadataTest {
         when(charsetResult.getString(1)).thenReturn("id", "updated_at");
         when(charsetResult.getString(4)).thenReturn("", expression);
         when(charsetResult.getString(5)).thenReturn("bigint", "datetime");
+        when(charsetResult.getString(6)).thenReturn("", expression.isEmpty() ? "DEFAULT_GENERATED on update CURRENT_TIMESTAMP(6)" : "STORED GENERATED");
         when(charset.executeQuery()).thenReturn(charsetResult);
         var triggers = mock(PreparedStatement.class); var triggerResult = mock(ResultSet.class);
         when(triggerResult.next()).thenReturn(true); when(triggers.executeQuery()).thenReturn(triggerResult);
@@ -64,6 +65,7 @@ class TableRegistryMysqlMetadataTest {
         assertThat(schema.columns().get(0).foreignKey()).isTrue();
         assertThat(schema.columns().get(1).foreignKey()).isFalse();
         assertThat(schema.columns().get(1).generated()).isEqualTo(!expression.isEmpty());
+        assertThat(schema.autoUpdatedColumns().contains("updated_at")).isEqualTo(expression.isEmpty());
         assertThat(SqlGenerator.checkEligibility(schema).eligible()).isEqualTo(expression.isEmpty());
     }
 }

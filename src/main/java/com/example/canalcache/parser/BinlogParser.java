@@ -8,6 +8,7 @@ import com.alibaba.otter.canal.protocol.CanalEntry.RowChange;
 import com.alibaba.otter.canal.protocol.CanalEntry.RowData;
 import com.example.canalcache.model.BinlogEvent;
 import com.example.canalcache.model.BinlogColumn;
+import com.example.canalcache.model.UnprocessableEventException;
 import com.google.protobuf.InvalidProtocolBufferException;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
@@ -31,29 +32,29 @@ public class BinlogParser {
     /** Platform entry point. Cache consumers continue to use parse(), which filters DDL. */
     public List<BinlogEvent> parseIncludingDdl(List<Entry> entries) {
         List<BinlogEvent> events = new ArrayList<>();
-
         for (int entryIndex = 0; entryIndex < entries.size(); entryIndex++) {
-            Entry entry = entries.get(entryIndex);
-            if (entry.getEntryType() != EntryType.ROWDATA) {
-                continue;
-            }
-
-            try {
-                RowChange rowChange = RowChange.parseFrom(entry.getStoreValue());
-                if (rowChange.getIsDdl()) {
-                    events.add(baseEvent(entry, entryIndex, -1, rowChange.getEventType())
-                            .ddl(true).ddlSql(rowChange.getSql()).build());
-                } else {
-                    events.addAll(parseRowChange(entry, entryIndex, rowChange));
-                }
-            } catch (InvalidProtocolBufferException e) {
-                throw new IllegalArgumentException("Failed to parse RowChange at "
-                        + entry.getHeader().getLogfileName() + ":"
-                        + entry.getHeader().getLogfileOffset(), e);
-            }
+            events.addAll(parseEntry(entries.get(entryIndex), entryIndex));
         }
-
         return events;
+    }
+
+    /** 解析单个 Entry（包含 DDL）。缓存消费者按 Entry 调用，坏的 Entry 只影响自己。 */
+    public List<BinlogEvent> parseEntry(Entry entry, int entryIndex) {
+        if (entry.getEntryType() != EntryType.ROWDATA) {
+            return List.of();
+        }
+        try {
+            RowChange rowChange = RowChange.parseFrom(entry.getStoreValue());
+            if (rowChange.getIsDdl()) {
+                return List.of(baseEvent(entry, entryIndex, -1, rowChange.getEventType())
+                        .ddl(true).ddlSql(rowChange.getSql()).build());
+            }
+            return parseRowChange(entry, entryIndex, rowChange);
+        } catch (InvalidProtocolBufferException e) {
+            throw new UnprocessableEventException(UnprocessableEventException.Reason.MALFORMED_ENTRY,
+                    "Failed to parse RowChange at " + entry.getHeader().getLogfileName() + ":"
+                            + entry.getHeader().getLogfileOffset(), e);
+        }
     }
 
     private List<BinlogEvent> parseRowChange(Entry entry, int entryIndex, RowChange rowChange) {

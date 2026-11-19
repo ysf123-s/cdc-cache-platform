@@ -59,7 +59,9 @@ class CacheRegistrationTest {
 
     @ParameterizedTest
     @ValueSource(strings = {"duplicateTable", "overlap", "samePrefix", "zeroTtl", "negativeTtl", "zeroSize",
-            "badTemplate", "noPrefix", "middlePlaceholder", "badTable", "missingId", "stringId", "multipleIds"})
+            "badTemplate", "noPrefix", "middlePlaceholder", "badTable", "missingId", "stringId", "multipleIds",
+            "reservedPrefix", "reservedSubPrefix", "badIndexTemplate", "unknownIndexColumn", "indexOverlapsMainPrefix",
+            "indexOverlapsOtherGroup"})
     void invalidEntityConfigurationCannotStartApplication(String problem) {
         AutoCache annotation = annotation("books", "book:#id");
         Class<?> entity = LongId.class;
@@ -71,6 +73,11 @@ class CacheRegistrationTest {
             case "noPrefix" -> when(annotation.keyTemplate()).thenReturn("#id");
             case "middlePlaceholder" -> when(annotation.keyTemplate()).thenReturn("book:#id:copy");
             case "badTable" -> when(annotation.table()).thenReturn("demo.books");
+            case "reservedPrefix" -> when(annotation.keyTemplate()).thenReturn("canal-cache:#id");
+            case "reservedSubPrefix" -> when(annotation.keyTemplate()).thenReturn("canal-cache:books:#id");
+            case "badIndexTemplate" -> when(annotation.indexKeys()).thenReturn(new String[]{"book-id:id"});
+            case "unknownIndexColumn" -> when(annotation.indexKeys()).thenReturn(new String[]{"book-isbn:#isbn"});
+            case "indexOverlapsMainPrefix" -> when(annotation.indexKeys()).thenReturn(new String[]{"book:#id"});
             case "missingId" -> entity = MissingId.class;
             case "stringId" -> entity = StringId.class;
             case "multipleIds" -> entity = MultipleIds.class;
@@ -83,9 +90,23 @@ class CacheRegistrationTest {
             if (problem.equals("duplicateTable")) register(processor, LongId.class, annotation("books", "other:#id"));
             if (problem.equals("overlap")) register(processor, LongId.class, annotation("archive", "book:archive:#id"));
             if (problem.equals("samePrefix")) register(processor, LongId.class, annotation("archive", "book:#id"));
+            if (problem.equals("indexOverlapsOtherGroup")) {
+                AutoCache archive = annotation("archive", "archive:#id");
+                when(archive.indexKeys()).thenReturn(new String[]{"book:old:#id"});
+                register(processor, LongId.class, archive);
+            }
             return processor;
         }).run(ctx -> assertThat(ctx).hasFailed().getFailure().hasRootCauseInstanceOf(
                 problem.equals("missingId") ? NoSuchFieldException.class : IllegalStateException.class));
+    }
+
+    @Test
+    void scannedUserDeclaresEmailIndexInItsOwnNamespace() {
+        var users = scanned().getConfig("users");
+        assertThat(users.getIndexKeys()).containsExactly(
+                new com.example.canalcache.model.AutoCacheConfig.IndexKey("user-email:#email", "email"));
+        assertThat(users.allPrefixes()).containsExactly("user:", "user-email:");
+        assertThat(users.indexKey("email").buildKey("a@x.com")).isEqualTo("user-email:a@x.com");
     }
 
     @Test
@@ -115,7 +136,8 @@ class CacheRegistrationTest {
         AutoCache result = mock(AutoCache.class);
         when(result.table()).thenReturn(table); when(result.keyTemplate()).thenReturn(template);
         when(result.expireSeconds()).thenReturn(60); when(result.maxSizeBytes()).thenReturn(1000);
-        when(result.strategy()).thenReturn(CacheStrategy.DELETE_MODE); return result;
+        when(result.strategy()).thenReturn(CacheStrategy.DELETE_MODE);
+        when(result.indexKeys()).thenReturn(new String[0]); return result;
     }
     private void register(CacheAnnotationProcessor processor, Class<?> entity, AutoCache annotation) {
         ReflectionTestUtils.invokeMethod(processor, "registerConfig", entity, annotation);

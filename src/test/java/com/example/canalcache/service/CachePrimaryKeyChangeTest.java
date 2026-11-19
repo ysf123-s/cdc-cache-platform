@@ -9,6 +9,7 @@ import com.example.canalcache.parser.BinlogParser;
 import com.example.canalcache.parser.FlatMessageBinlogParser;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.EnumSource;
@@ -56,6 +57,26 @@ class CachePrimaryKeyChangeTest {
         verify(fixture.redis).delete("user:" + after);
         if (before != after) verify(fixture.redis).delete("user:" + before);
         verifyNoMoreInteractions(fixture.redis);
+    }
+
+    @ParameterizedTest
+    @EnumSource(CacheStrategy.class)
+    void minimalRowImageUpdateUsesBeforeImageKeyAndOnlyDeletes(CacheStrategy strategy) {
+        var fixture = new Fixture(strategy, false);
+        fixture.sync.handleEvent(BinlogEvent.builder().tableName("users").eventType(EventType.UPDATE)
+                .beforeData(Map.of("id", "1", "name", "before")).afterData(Map.of("name", "after")).build());
+        verify(fixture.redis).delete("user:1");
+        verifyNoMoreInteractions(fixture.redis);
+        verifyNoInteractions(fixture.versions);
+    }
+
+    @Test
+    void refreshFallsBackToDeleteWhenRowCannotBeConvertedToEntity() {
+        var fixture = new Fixture(CacheStrategy.REFRESH_MODE, false);
+        fixture.sync.handleEvent(BinlogEvent.builder().tableName("users").eventType(EventType.UPDATE)
+                .beforeData(Map.of("id", "1")).afterData(Map.of("id", "1", "created_at", "not-a-date")).build());
+        verify(fixture.redis).delete("user:1");
+        verifyNoInteractions(fixture.versions);
     }
 
     private static BinlogEvent update(Object before, Object after) {

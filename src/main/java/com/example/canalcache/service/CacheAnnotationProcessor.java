@@ -1,5 +1,6 @@
 package com.example.canalcache.service;
 
+import com.baomidou.mybatisplus.annotation.TableField;
 import com.baomidou.mybatisplus.annotation.TableId;
 import com.example.canalcache.annotation.AutoCache;
 import com.example.canalcache.model.AutoCacheConfig;
@@ -11,7 +12,10 @@ import org.springframework.core.type.filter.AnnotationTypeFilter;
 import org.springframework.stereotype.Component;
 
 import java.lang.reflect.Field;
+import java.util.Arrays;
 import java.util.Collections;
+import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -22,6 +26,8 @@ import java.util.concurrent.ConcurrentHashMap;
 @Slf4j
 @Component
 public class CacheAnnotationProcessor {
+    /** 组件自身使用的 Redis 命名空间（如死信 Stream），业务缓存分组不能占用。 */
+    static final String RESERVED_PREFIX = "canal-cache:";
 
     @Value("${canal.cache.base-package:com.example.canalcache}")
     private String basePackage;
@@ -69,17 +75,28 @@ public class CacheAnnotationProcessor {
         config.setExpireSeconds(annotation.expireSeconds());
         config.setMaxSizeBytes(annotation.maxSizeBytes());
         config.setEnableVersionControl(annotation.enableVersionControl());
+        config.setIndexKeys(Arrays.stream(annotation.indexKeys()).map(AutoCacheConfig.IndexKey::parse).toList());
 
         extractIdFieldInfo(clazz, config);
         validateConfig(config);
         if (tableConfigMap.containsKey(config.getTable())) {
             throw new IllegalStateException("Duplicate cache table: " + config.getTable());
         }
-        String prefix = config.keyPrefix();
-        for (AutoCacheConfig existing : tableConfigMap.values()) {
-            if (prefix.startsWith(existing.keyPrefix()) || existing.keyPrefix().startsWith(prefix)) {
-                throw new IllegalStateException("Overlapping cache prefixes: " + config.getKeyTemplate()
-                        + " and " + existing.getKeyTemplate());
+        // 主键缓存与二级索引缓存共用整表清空和浏览，所有命名空间之间不能互为前缀。
+        List<String> prefixes = config.allPrefixes();
+        for (int i = 0; i < prefixes.size(); i++) {
+            String prefix = prefixes.get(i);
+            if (DeadLetterStore.STREAM_KEY.startsWith(prefix) || prefix.startsWith(RESERVED_PREFIX)) {
+                throw new IllegalStateException("Cache prefix overlaps reserved namespace " + RESERVED_PREFIX
+                        + ": " + prefix);
+            }
+            for (String other : prefixes.subList(i + 1, prefixes.size())) {
+                requireDisjoint(prefix, other);
+            }
+            for (AutoCacheConfig existing : tableConfigMap.values()) {
+                for (String other : existing.allPrefixes()) {
+                    requireDisjoint(prefix, other);
+                }
             }
         }
         tableConfigMap.put(config.getTable(), config);
@@ -102,6 +119,33 @@ public class CacheAnnotationProcessor {
         if (config.getIdFieldType() != Long.class && config.getIdFieldType() != long.class) {
             throw new IllegalStateException(context + "only Long/long primary keys are supported");
         }
+        for (AutoCacheConfig.IndexKey index : config.getIndexKeys()) {
+            if (!index.template().matches("[A-Za-z0-9_-]+(?::[A-Za-z0-9_-]+)*:#[A-Za-z_][A-Za-z0-9_]*")) {
+                throw new IllegalStateException(context + "indexKeys must use a fixed namespace followed by :#column");
+            }
+            if (!hasColumn(config.getEntityClass(), index.column())) {
+                throw new IllegalStateException(context + "index column not found on entity: " + index.column());
+            }
+        }
+    }
+
+    private static void requireDisjoint(String prefix, String other) {
+        if (prefix.startsWith(other) || other.startsWith(prefix)) {
+            throw new IllegalStateException("Overlapping cache prefixes: " + prefix + " and " + other);
+        }
+    }
+
+    /** binlog 使用数据库列名：@TableField 指定的列名，或字段名的下划线形式。 */
+    private static boolean hasColumn(Class<?> clazz, String column) {
+        for (Field field : clazz.getDeclaredFields()) {
+            TableField tableField = field.getAnnotation(TableField.class);
+            String name = tableField != null && !tableField.value().isBlank() ? tableField.value()
+                    : field.getName().replaceAll("([A-Z])", "_$1").toLowerCase(Locale.ROOT);
+            if (name.equals(column)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private void extractIdFieldInfo(Class<?> clazz, AutoCacheConfig config) {

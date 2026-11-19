@@ -3,6 +3,7 @@ package com.example.canalcache.service;
 import com.example.canalcache.model.AutoCacheConfig;
 import com.example.canalcache.model.BatchQueryResult;
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.micrometer.core.instrument.MeterRegistry;
 import org.springframework.data.redis.connection.ReturnType;
@@ -58,6 +59,8 @@ public class CachedQueryService {
             new DefaultRedisScript<>(FILL_SCRIPT, Long.class);
     private static final DefaultRedisScript<Long> CLEANUP_LOAD =
             new DefaultRedisScript<>(CLEANUP_SCRIPT, Long.class);
+
+    private static final TypeReference<List<Long>> ID_LIST = new TypeReference<>() { };
 
     private final RedisTemplate<String, String> redis;
     private final CacheAnnotationProcessor processor;
@@ -130,6 +133,54 @@ public class CachedQueryService {
             }
         }
         return new BatchQueryResult<>(items, missingIds);
+    }
+
+    /**
+     * 按二级索引查主键列表。索引缓存与主键缓存一样使用 load_token：失效 DEL 会删除标识，
+     * 失效前开始的回源结果无法回填；空列表按空值缓存的短 TTL 保存。
+     */
+    public List<Long> getIndexedIds(String table, String column, String value, Supplier<List<Long>> loader) {
+        AutoCacheConfig config = processor.getConfig(table);
+        String key = config.indexKey(column).buildKey(value);
+        Object cached = redis.opsForHash().get(key, "data");
+        registry.counter("cache.index.items", "table", table, "index", column,
+                "result", cached == null ? "miss" : "hit").increment();
+        if (cached != null) {
+            return parseIds(cached.toString(), key);
+        }
+        CompletableFuture<String> mine = new CompletableFuture<>();
+        CompletableFuture<String> previous = inFlight.putIfAbsent(key, mine);
+        if (previous != null) {
+            registry.counter("cache.index.coalesced", "table", table, "index", column).increment();
+            return parseIds(previous.join(), key);
+        }
+        String token = UUID.randomUUID().toString();
+        try {
+            // 原子复查并登记本次加载，与主键缓存的回填保护相同。
+            Object rechecked = redis.execute(BEGIN_LOAD, List.of(key), token, String.valueOf(LOAD_TOKEN_SECONDS));
+            String json;
+            if (rechecked != null) {
+                json = rechecked.toString();
+            } else {
+                json = serialize(loader.get().stream().distinct().sorted().toList(), key);
+                Long outcome = redis.execute(FILL_IF_TOKEN_MATCHES, List.of(key), json,
+                        String.valueOf(ttl(config, json)), token);
+                registry.counter("cache.index.fills", "table", table, "index", column,
+                        "result", Long.valueOf(1).equals(outcome) ? "written" : "rejected").increment();
+            }
+            mine.complete(json);
+            return parseIds(json, key);
+        } catch (RuntimeException | Error e) {
+            try {
+                redis.execute(CLEANUP_LOAD, List.of(key), token);
+            } catch (RuntimeException | Error cleanupFailure) {
+                e.addSuppressed(cleanupFailure);
+            }
+            mine.completeExceptionally(e);
+            throw e;
+        } finally {
+            inFlight.remove(key, mine);
+        }
     }
 
     private <T> void loadOwned(String table, AutoCacheConfig config,
@@ -240,7 +291,20 @@ public class CachedQueryService {
     }
 
     private int ttl(AutoCacheConfig config, String json) {
-        return "null".equals(json) ? NULL_CACHE_SECONDS : config.getExpireSeconds();
+        return "null".equals(json) || "[]".equals(json) ? NULL_CACHE_SECONDS : config.getExpireSeconds();
+    }
+
+    private List<Long> parseIds(String json, String key) {
+        List<Long> ids;
+        try {
+            ids = objectMapper.readValue(json, ID_LIST);
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Invalid cache data for " + key, e);
+        }
+        if (ids == null || ids.contains(null)) {
+            throw new IllegalStateException("Invalid cache data for " + key);
+        }
+        return List.copyOf(ids);
     }
 
     private String serialize(Object value, String key) {

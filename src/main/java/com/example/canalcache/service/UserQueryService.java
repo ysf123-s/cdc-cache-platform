@@ -22,4 +22,10 @@ public class UserQueryService {
     public BatchQueryResult<User> getByIds(List<Long> ids) {
         return queries.getByIds("users", ids, User.class);
     }
+
+    /** 按邮箱精确查询（区分大小写）。索引列表与实体缓存之间有异步窗口，返回前再核对邮箱。 */
+    public List<User> getByEmail(String email) {
+        return queries.getByIndex("users", "email", email, User.class).stream()
+                .filter(user -> email.equals(user.getEmail())).toList();
+    }
 }

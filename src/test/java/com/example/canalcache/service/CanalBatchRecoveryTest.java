@@ -39,6 +39,7 @@ class CanalBatchRecoveryTest {
     private final RedisTemplate<String, String> redis = mock(RedisTemplate.class);
     private final VersionControllerWithLua versions = new VersionControllerWithLua(redis);
     private final AutoCacheConfig config = new AutoCacheConfig();
+    private final SimpleMeterRegistry metrics = new SimpleMeterRegistry();
     private CanalCacheSyncService service;
 
     @BeforeEach
@@ -51,7 +52,7 @@ class CanalBatchRecoveryTest {
         when(processor.getConfig("users")).thenReturn(config);
         service = new CanalCacheSyncService(connector, new BinlogParser(),
                 new FlatMessageBinlogParser(), processor, versions,
-                mock(BigKeyDetector.class), redis, new ObjectMapper(), new SimpleMeterRegistry());
+                mock(BigKeyDetector.class), redis, new ObjectMapper(), metrics);
     }
 
     @Test
@@ -96,18 +97,92 @@ class CanalBatchRecoveryTest {
     }
 
     @Test
-    void malformedRowChangeDoesNotAcknowledgeBatch() {
-        CanalEntry.Entry entry = CanalEntry.Entry.newBuilder()
-                .setEntryType(CanalEntry.EntryType.ROWDATA)
-                .setStoreValue(ByteString.copyFrom(new byte[]{10, 5, 1}))
-                .build();
+    void malformedEntryIsDeadLetteredWhileOtherEntriesAreProcessed() {
+        config.setEnableVersionControl(false);
         when(consumer.getRecordsWithoutAck()).thenReturn(List.of(
-                new KafkaCanalRecord("canal-test", 0, 0L, new Message(1L, List.of(entry)))));
+                recordOf(malformedEntry(), rowEntry(CanalEntry.EventType.INSERT, column("id", "1")))));
+        when(redis.delete("user:1")).thenReturn(true);
 
-        assertThatThrownBy(() -> service.processBatch(consumer))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("Failed to parse RowChange");
+        assertThat(service.processBatch(consumer)).isTrue();
+
+        var order = inOrder(redis, consumer);
+        order.verify(redis).delete("user:1");
+        order.verify(redis).execute(any(RedisScript.class), eq(List.of(DeadLetterStore.STREAM_KEY)), any(Object[].class));
+        order.verify(consumer).ack();
+        assertThat(deadLettered("MALFORMED_ENTRY")).isEqualTo(1);
+    }
+
+    @Test
+    void missingPrimaryKeyIsDeadLetteredAndLaterRowsStillInvalidate() {
+        config.setEnableVersionControl(false);
+        when(consumer.getRecordsWithoutAck()).thenReturn(List.of(recordOf(
+                rowEntry(CanalEntry.EventType.UPDATE, column("name", "no id")),
+                rowEntry(CanalEntry.EventType.UPDATE, column("id", "2")))));
+        when(redis.delete("user:2")).thenReturn(true);
+
+        assertThat(service.processBatch(consumer)).isTrue();
+
+        verify(redis).delete("user:2");
+        verify(consumer).ack();
+        assertThat(deadLettered("MISSING_PRIMARY_KEY")).isEqualTo(1);
+    }
+
+    @Test
+    void deadLetterWriteFailureRollsBackInsteadOfLosingTheEvent() {
+        when(consumer.getRecordsWithoutAck()).thenReturn(List.of(recordOf(malformedEntry())));
+        when(redis.execute(any(RedisScript.class), anyList(), any(Object[].class)))
+                .thenThrow(new RedisConnectionFailureException("Redis unavailable"));
+
+        assertThatThrownBy(() -> service.processBatch(consumer)).isInstanceOf(RedisConnectionFailureException.class);
+
         verify(consumer, never()).ack();
+        assertThat(deadLettered("MALFORMED_ENTRY")).isZero();
+    }
+
+    @Test
+    void failedBatchWritesNoDeadLettersSoRetriesCannotDuplicateThem() {
+        config.setEnableVersionControl(false);
+        when(consumer.getRecordsWithoutAck()).thenReturn(List.of(
+                recordOf(malformedEntry(), rowEntry(CanalEntry.EventType.INSERT, column("id", "1")))));
+        when(redis.delete("user:1")).thenThrow(new RedisConnectionFailureException("Redis unavailable"));
+
+        assertThatThrownBy(() -> service.processBatch(consumer)).isInstanceOf(RedisConnectionFailureException.class);
+
+        verify(redis, never()).execute(any(RedisScript.class), anyList(), any(Object[].class));
+        verify(consumer, never()).ack();
+    }
+
+    @ParameterizedTest
+    @EnumSource(value = CanalEntry.EventType.class, names = {"TRUNCATE", "ERASE", "RENAME"})
+    void tableLevelDdlPurgesRegisteredGroupBeforeAcknowledging(CanalEntry.EventType type) {
+        when(consumer.getRecordsWithoutAck()).thenReturn(List.of(recordOf(ddlEntry("users", type))));
+        when(redis.execute(any(RedisScript.class), eq(List.of()), any(Object[].class)))
+                .thenReturn(List.of("0", List.of("user:1", "user:2", "user:stats")));
+        when(redis.unlink(List.of("user:1", "user:2"))).thenReturn(2L);
+
+        assertThat(service.processBatch(consumer)).isTrue();
+
+        var order = inOrder(redis, consumer);
+        order.verify(redis).unlink(List.of("user:1", "user:2"));
+        order.verify(consumer).ack();
+        assertThat(metrics.get("canal.cache.purged").counter().count()).isEqualTo(2);
+    }
+
+    @Test
+    void ddlThatKeepsRowsOrTargetsUnregisteredTableDoesNotTouchRedis() {
+        when(consumer.getRecordsWithoutAck()).thenReturn(List.of(recordOf(
+                ddlEntry("users", CanalEntry.EventType.ALTER), ddlEntry("orders", CanalEntry.EventType.TRUNCATE))));
+
+        assertThat(service.processBatch(consumer)).isTrue();
+
+        verify(consumer).ack();
+        verifyNoInteractions(redis);
+    }
+
+    @Test
+    void retryDelayDoublesUpToThirtySeconds() {
+        assertThat(List.of(1, 2, 3, 4, 5, 6, 50).stream().map(CanalCacheSyncService::retryDelayMs))
+                .containsExactly(1_000L, 2_000L, 4_000L, 8_000L, 16_000L, 30_000L, 30_000L);
     }
 
     @Test
@@ -176,13 +251,43 @@ class CanalBatchRecoveryTest {
     }
 
     private KafkaCanalRecord record(CanalEntry.EventType type) {
-        CanalEntry.Column id = CanalEntry.Column.newBuilder().setName("id").setValue("1").build();
-        CanalEntry.RowChange change = CanalEntry.RowChange.newBuilder().setEventType(type)
-                .addRowDatas(CanalEntry.RowData.newBuilder().addBeforeColumns(id).addAfterColumns(id)).build();
-        CanalEntry.Entry entry = CanalEntry.Entry.newBuilder()
-                .setHeader(CanalEntry.Header.newBuilder().setTableName("users")
+        return recordOf(rowEntry(type, column("id", "1")));
+    }
+
+    private double deadLettered(String reason) {
+        var counter = metrics.find(DeadLetterStore.METRIC).tag("reason", reason).counter();
+        return counter == null ? 0 : counter.count();
+    }
+
+    private static KafkaCanalRecord recordOf(CanalEntry.Entry... entries) {
+        return new KafkaCanalRecord("example", 0, 1L, new Message(1L, List.of(entries)));
+    }
+
+    private static CanalEntry.Column column(String name, String value) {
+        return CanalEntry.Column.newBuilder().setName(name).setValue(value).build();
+    }
+
+    private static CanalEntry.Entry rowEntry(CanalEntry.EventType type, CanalEntry.Column... columns) {
+        CanalEntry.RowData.Builder row = CanalEntry.RowData.newBuilder();
+        for (CanalEntry.Column column : columns) {
+            row.addBeforeColumns(column).addAfterColumns(column);
+        }
+        return entry("users", CanalEntry.RowChange.newBuilder().setEventType(type).addRowDatas(row).build().toByteString());
+    }
+
+    private static CanalEntry.Entry ddlEntry(String table, CanalEntry.EventType type) {
+        return entry(table, CanalEntry.RowChange.newBuilder().setEventType(type).setIsDdl(true)
+                .setSql(type + " TABLE " + table).build().toByteString());
+    }
+
+    private static CanalEntry.Entry malformedEntry() {
+        return entry("users", ByteString.copyFrom(new byte[]{10, 5, 1}));
+    }
+
+    private static CanalEntry.Entry entry(String table, ByteString storeValue) {
+        return CanalEntry.Entry.newBuilder()
+                .setHeader(CanalEntry.Header.newBuilder().setTableName(table)
                         .setLogfileName("mysql-bin.000001").setLogfileOffset(100L))
-                .setEntryType(CanalEntry.EntryType.ROWDATA).setStoreValue(change.toByteString()).build();
-        return new KafkaCanalRecord("canal-test", 0, 0L, new Message(1L, List.of(entry)));
+                .setEntryType(CanalEntry.EntryType.ROWDATA).setStoreValue(storeValue).build();
     }
 }

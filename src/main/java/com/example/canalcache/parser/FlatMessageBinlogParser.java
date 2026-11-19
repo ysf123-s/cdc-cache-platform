@@ -3,6 +3,7 @@ package com.example.canalcache.parser;
 import com.alibaba.otter.canal.protocol.CanalEntry.EventType;
 import com.alibaba.otter.canal.protocol.FlatMessage;
 import com.example.canalcache.model.BinlogEvent;
+import com.example.canalcache.model.UnprocessableEventException;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
@@ -22,14 +23,44 @@ public class FlatMessageBinlogParser {
             if (flatMessage == null || Boolean.TRUE.equals(flatMessage.getIsDdl())) {
                 continue;
             }
-            events.addAll(parseFlatMessage(flatMessage));
+            events.addAll(parseMessage(flatMessage));
         }
         return events;
     }
 
-    private List<BinlogEvent> parseFlatMessage(FlatMessage flatMessage) {
+    /** 解析单条 FlatMessage（包含 DDL）。缓存消费者按消息调用，坏消息只影响自己。 */
+    public List<BinlogEvent> parseMessage(FlatMessage flatMessage) {
+        if (flatMessage == null) {
+            return List.of();
+        }
+        EventType eventType = eventType(flatMessage);
+        if (Boolean.TRUE.equals(flatMessage.getIsDdl())) {
+            return List.of(BinlogEvent.builder()
+                    .databaseName(flatMessage.getDatabase())
+                    .tableName(flatMessage.getTable())
+                    .eventType(eventType)
+                    .ddl(true)
+                    .ddlSql(flatMessage.getSql())
+                    .binlogFile("mq")
+                    .binlogPosition(0L)
+                    .eventTimestamp(flatMessage.getEs() == null ? 0L : flatMessage.getEs())
+                    .build());
+        }
+        return parseRows(flatMessage, eventType);
+    }
+
+    private EventType eventType(FlatMessage flatMessage) {
+        for (EventType candidate : EventType.values()) {
+            if (candidate.name().equals(flatMessage.getType())) {
+                return candidate;
+            }
+        }
+        throw new UnprocessableEventException(UnprocessableEventException.Reason.UNKNOWN_EVENT_TYPE,
+                "Unknown FlatMessage type " + flatMessage.getType() + " for table " + flatMessage.getTable());
+    }
+
+    private List<BinlogEvent> parseRows(FlatMessage flatMessage, EventType eventType) {
         List<BinlogEvent> events = new ArrayList<>();
-        EventType eventType = EventType.valueOf(flatMessage.getType());
         List<Map<String, String>> dataRows = safeRows(flatMessage.getData());
         List<Map<String, String>> oldRows = safeRows(flatMessage.getOld());
 

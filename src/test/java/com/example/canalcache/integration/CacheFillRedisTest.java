@@ -115,7 +115,8 @@ class CacheFillRedisTest {
     @Test
     void manualHttpInvalidationAlsoRejectsOldFill() throws Exception {
         CountDownLatch entered = new CountDownLatch(1), release = new CountDownLatch(1);
-        var controller = new CacheManagementController(processor, redis, metrics, sync, new CacheBrowseService(redis));
+        var controller = new CacheManagementController(processor, redis, metrics, sync, new CacheBrowseService(redis),
+                new CacheNamespacePurger(redis, new CacheBrowseService(redis)), new DeadLetterStore(redis, json, metrics));
         var mvc = org.springframework.test.web.servlet.setup.MockMvcBuilders.standaloneSetup(controller).build();
         Future<User> first = executor.submit(() -> queries.getById("users", 1L, User.class, () -> {
             entered.countDown(); waitOn(release); return user(1, "old");

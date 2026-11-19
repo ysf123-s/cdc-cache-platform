@@ -3,12 +3,14 @@ package com.example.canalcache.parser;
 import com.alibaba.otter.canal.protocol.FlatMessage;
 import com.alibaba.otter.canal.protocol.CanalEntry.EventType;
 import com.example.canalcache.model.BinlogEvent;
+import com.example.canalcache.model.UnprocessableEventException;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class FlatMessageBinlogParserTest {
 
@@ -37,5 +39,35 @@ class FlatMessageBinlogParserTest {
         ddl.setIsDdl(true);
 
         assertThat(parser.parse(List.of(ddl))).isEmpty();
+    }
+
+    @Test
+    void singleMessageParsingKeepsDdlForCacheConsumer() {
+        FlatMessage truncate = new FlatMessage();
+        truncate.setDatabase("demo_db");
+        truncate.setTable("users");
+        truncate.setType("TRUNCATE");
+        truncate.setIsDdl(true);
+        truncate.setSql("TRUNCATE TABLE users");
+
+        List<BinlogEvent> events = parser.parseMessage(truncate);
+
+        assertThat(events).singleElement().satisfies(event -> {
+            assertThat(event.isDdl()).isTrue();
+            assertThat(event.getEventType()).isEqualTo(EventType.TRUNCATE);
+            assertThat(event.getTableName()).isEqualTo("users");
+        });
+    }
+
+    @Test
+    void unknownTypeIsUnprocessable() {
+        FlatMessage unknown = new FlatMessage();
+        unknown.setTable("users");
+        unknown.setType("UPSERT");
+        unknown.setIsDdl(false);
+
+        assertThatThrownBy(() -> parser.parseMessage(unknown))
+                .isInstanceOf(UnprocessableEventException.class)
+                .hasMessageContaining("UPSERT");
     }
 }

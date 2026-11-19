@@ -15,11 +15,13 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ResponseStatusException;
 
 import java.net.URI;
+import java.util.List;
 import java.util.Map;
 
 @RestController
@@ -32,6 +34,14 @@ public class UserController {
     public UserController(UserQueryService userQueryService, UserWriteService userWriteService) {
         this.userQueryService = userQueryService;
         this.userWriteService = userWriteService;
+    }
+
+    @GetMapping("/by-email")
+    public List<User> getByEmail(@RequestParam String email) {
+        if (email.isBlank() || email.length() > 128) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "email must be non-blank and at most 128 characters");
+        }
+        return userQueryService.getByEmail(email);
     }
 
     @GetMapping("/{id}")

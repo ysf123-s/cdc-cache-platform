@@ -18,6 +18,7 @@ import java.util.Date;
 @AutoCache(
     table = "users",
     keyTemplate = "user:#id",
+    indexKeys = "user-email:#email",
     strategy = CacheStrategy.DELETE_MODE,
     expireSeconds = 1800,
     enableVersionControl = false

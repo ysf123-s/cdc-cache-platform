@@ -25,6 +25,12 @@ public @interface AutoCache {
     String keyTemplate();
 
     /**
+     * 二级索引缓存，格式为固定命名空间后接 :#列名，例如 user-email:#email。
+     * 缓存值是该列取值对应的主键列表；行变更时用修改前、修改后的列值各删一次，不刷新。
+     */
+    String[] indexKeys() default {};
+
+    /**
      * 缓存同步策略。
      */
     CacheStrategy strategy() default CacheStrategy.HYBRID_MODE;

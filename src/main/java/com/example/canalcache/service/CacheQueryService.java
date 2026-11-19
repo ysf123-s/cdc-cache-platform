@@ -21,4 +21,10 @@ public class CacheQueryService {
         CacheDataLoader<T> loader = registry.get(table, type);
         return cached.getByIds(table, ids, type, loader::loadByIds, loader::idOf);
     }
+    /** 先查二级索引缓存得到主键列表，再走主键缓存取实体。调用方应再核对实体的列值，过滤掉刚被修改的行。 */
+    public <T> List<T> getByIndex(String table, String column, String value, Class<T> type) {
+        CacheDataLoader<T> loader = registry.get(table, type);
+        List<Long> ids = cached.getIndexedIds(table, column, value, () -> loader.loadIdsByIndex(column, value));
+        return ids.isEmpty() ? List.of() : cached.getByIds(table, ids, type, loader::loadByIds, loader::idOf).items();
+    }
 }

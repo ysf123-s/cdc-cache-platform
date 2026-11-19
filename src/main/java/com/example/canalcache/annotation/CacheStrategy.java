@@ -16,7 +16,7 @@ public enum CacheStrategy {
     REFRESH_MODE,
 
     /**
-     * 混合策略：大 key 删除；高频更新 key 更新；低频更新 key 删除。
+     * 混合策略：超过 maxSizeBytes 的大 key 删除，其余只刷新已存在的缓存。不做热 key 识别。
      */
     HYBRID_MODE
 }

@@ -17,12 +17,16 @@ public class CacheBrowseService {
     private final RedisTemplate<String, String> redis;
     public CacheBrowseService(RedisTemplate<String, String> redis) { this.redis = redis; }
 
+    /** 扫描一批前缀下的 Hash key，不做过滤。 */
+    public ScanPage scan(String prefix, String cursor, int count) {
+        List<?> result = redis.execute(SCAN_PAGE, List.of(), cursor, prefix + "*", String.valueOf(count));
+        return new ScanPage(result.get(0).toString(), ((List<?>) result.get(1)).stream().map(Object::toString).toList());
+    }
+
     public KeyPage browse(String table, AutoCacheConfig config, String cursor, int count) {
-        List<?> result = redis.execute(SCAN_PAGE, List.of(), cursor, config.keyPrefix() + "*", String.valueOf(count));
-        String nextCursor = result.get(0).toString();
+        ScanPage page = scan(config.keyPrefix(), cursor, count);
         Map<String, KeyView> entries = new LinkedHashMap<>();
-        for (Object value : (List<?>) result.get(1)) {
-            String key = value.toString();
+        for (String key : page.keys()) {
             String suffix = key.substring(config.keyPrefix().length());
             try {
                 long id = Long.parseLong(suffix);
@@ -32,8 +36,10 @@ public class CacheBrowseService {
                 // Redis 命名空间可能含其他元数据；它们不是可按 Long 主键维护的缓存。
             }
         }
-        return new KeyPage(table, cursor, nextCursor, count, List.copyOf(entries.values()));
+        return new KeyPage(table, cursor, page.nextCursor(), count, List.copyOf(entries.values()));
     }
+
+    public record ScanPage(String nextCursor, List<String> keys) { }
 
     /** ID 用字符串传给浏览器，避免 JavaScript Number 截断 Long 主键。 */
     public record KeyView(String id, String key) { }

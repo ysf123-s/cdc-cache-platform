@@ -5,8 +5,10 @@ import com.example.canalcache.model.AutoCacheConfig;
 import com.example.canalcache.model.SyncStatus;
 import com.example.canalcache.service.CacheAnnotationProcessor;
 import com.example.canalcache.service.CacheBrowseService;
+import com.example.canalcache.service.CacheNamespacePurger;
 import com.example.canalcache.service.CachedQueryService;
 import com.example.canalcache.service.CanalCacheSyncService;
+import com.example.canalcache.service.DeadLetterStore;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
 import org.springframework.data.redis.core.RedisTemplate;
@@ -34,15 +36,20 @@ public class CacheManagementController {
     private final MeterRegistry registry;
     private final CanalCacheSyncService syncService;
     private final CacheBrowseService browser;
+    private final CacheNamespacePurger purger;
+    private final DeadLetterStore deadLetters;
 
     public CacheManagementController(CacheAnnotationProcessor processor, RedisTemplate<String, String> redis,
                                      MeterRegistry registry, CanalCacheSyncService syncService,
-                                     CacheBrowseService browser) {
+                                     CacheBrowseService browser, CacheNamespacePurger purger,
+                                     DeadLetterStore deadLetters) {
         this.processor = processor;
         this.redis = redis;
         this.registry = registry;
         this.syncService = syncService;
         this.browser = browser;
+        this.purger = purger;
+        this.deadLetters = deadLetters;
     }
 
     @GetMapping("/groups/{table}/entries")
@@ -54,11 +61,21 @@ public class CacheManagementController {
         if (!start.matches("0|[1-9][0-9]{0,19}") || new BigInteger(start).bitLength() > 64) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "cursor must be an unsigned 64-bit integer");
         }
-        String requestedCount = count == null ? "20" : count;
-        if (!requestedCount.matches("[1-9][0-9]{0,2}") || Integer.parseInt(requestedCount) > 100) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "count must be between 1 and 100");
-        }
-        return browser.browse(table, config, start, Integer.parseInt(requestedCount));
+        return browser.browse(table, config, start, parseCount(count));
+    }
+
+    /** 清空整个分组的缓存，用于死信等无法定位到具体 ID 的兜底处理。 */
+    @PostMapping("/groups/{table}/purge")
+    public PurgeResult purge(@PathVariable String table) {
+        AutoCacheConfig config = requireConfig(table);
+        long deleted = purger.purge(table, config);
+        registry.counter("cache.management.purged", "table", table).increment(deleted);
+        return new PurgeResult(table, deleted);
+    }
+
+    @GetMapping("/dead-letters")
+    public List<DeadLetterStore.Entry> deadLetters(@RequestParam(required = false) String count) {
+        return deadLetters.recent(parseCount(count));
     }
 
     @GetMapping("/overview")
@@ -74,8 +91,11 @@ public class CacheManagementController {
                     count("cache.query.database.ids", "table", table),
                     count("cache.query.coalesced", "table", table));
         }).toList();
+        long deadLettered = (long) registry.find(DeadLetterStore.METRIC).counters().stream()
+                .mapToDouble(Counter::count).sum();
         return new Overview(Instant.now(), syncService.getStatus(), groups,
-                count("canal.events.processed"), count("canal.events.failed"), count("canal.cache.deleted"));
+                count("canal.events.processed"), count("canal.events.failed"), count("canal.cache.deleted"),
+                deadLettered);
     }
 
     @GetMapping("/entries/{table}/{id}")
@@ -100,6 +120,14 @@ public class CacheManagementController {
         return new InvalidationResult(keys.size(), deleted);
     }
 
+    private static int parseCount(String count) {
+        String requestedCount = count == null ? "20" : count;
+        if (!requestedCount.matches("[1-9][0-9]{0,2}") || Integer.parseInt(requestedCount) > 100) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "count must be between 1 and 100");
+        }
+        return Integer.parseInt(requestedCount);
+    }
+
     private AutoCacheConfig requireConfig(String table) {
         AutoCacheConfig config = processor.getConfig(table);
         if (config == null) {
@@ -114,7 +142,7 @@ public class CacheManagementController {
     }
 
     public record Overview(Instant capturedAt, SyncStatus sync, List<GroupView> groups,
-                           long processedEvents, long failedBatches, long deletedKeys) {
+                           long processedEvents, long failedBatches, long deletedKeys, long deadLetters) {
     }
 
     public record GroupView(String table, String keyTemplate, String strategy, int expireSeconds,
@@ -126,5 +154,8 @@ public class CacheManagementController {
     }
 
     public record InvalidationResult(int requestedKeys, long deletedKeys) {
+    }
+
+    public record PurgeResult(String table, long deletedKeys) {
     }
 }

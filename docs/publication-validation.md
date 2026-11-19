@@ -1,5 +1,18 @@
 # 发布验证
 
+## 2026-11-19：缓存失效链路加固
+
+- 无法处理的事件（Entry 无法解析、FlatMessage 类型未知、前后镜像都缺主键）写入 Redis Stream `canal-cache:dead-letters`（约保留 1 万条）后跳过，同批其他事件照常处理。Redis 等外部故障以及死信写入失败仍整批回滚重试，重试间隔从 1s 倍增至 30s。
+- 后镜像缺主键时改用前镜像，且只删除不刷新；刷新时行数据无法转换为实体则改为删除。
+- 已登记表的 TRUNCATE、DROP、RENAME 事件用 SCAN + UNLINK 清空该表的主键与索引缓存命名空间。新增 `POST /cache/groups/{table}/purge` 和 `GET /cache/dead-letters`；缓存控制台显示死信并可清空分组。
+- `@AutoCache.indexKeys` 声明二级索引缓存。users 表登记 `user-email:#email`，按修改前后的列值失效；`GET /users/by-email` 回填同样经过加载令牌校验，返回前核对邮箱。
+- 新增指标 `canal.events.dead_lettered`、`canal.cache.purged`、`canal.cache.refresh.fallback`、`canal.cache.invalidation.lag`。
+- 缓存控制台一并带上此前的可读性改造，使用共享的 `dashboard-ui.js` 与 `dashboard-ui.css`；平台页面不变。
+- 本次发布副本执行 `mvn -o -B verify` 通过：306 项用例中 266 项通过、40 项按环境条件跳过，0 失败、0 错误。
+- 使用云端 Redis 执行 `-Dtest=*RedisTest`：23 项通过（含 4 项二级索引测试），0 失败、0 跳过；测试只使用随机前缀 Key。
+- `node src/test/js/cache-dashboard.test.cjs` 与 `platform-dashboard.test.cjs` 通过。
+- Gitleaks 8.30.1 对暂存文件扫描：0 项发现；已知本机凭据逐值检查：0 项命中。
+- 尚未在真实 Canal 链路上端到端验证 RENAME 与 TRUNCATE。
 ## 2026-11-17：恢复 SQL 类型扩展
 
 - 补齐 BIT、TIMESTAMP、FLOAT/DOUBLE、JSON、ENUM/SET、YEAR、TIME、BINARY/VARBINARY/BLOB 的值生成及当前行比较。BIT(64) 按 Canal 的有符号 long 表示还原位模式；ENUM/SET 使用 Canal 记录的编号。

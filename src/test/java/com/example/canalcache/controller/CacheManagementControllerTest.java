@@ -6,6 +6,8 @@ import com.example.canalcache.model.BatchQueryResult;
 import com.example.canalcache.model.SyncStatus;
 import com.example.canalcache.service.CacheAnnotationProcessor;
 import com.example.canalcache.service.CacheBrowseService;
+import com.example.canalcache.service.CacheNamespacePurger;
+import com.example.canalcache.service.DeadLetterStore;
 import com.example.canalcache.service.CanalCacheSyncService;
 import com.example.canalcache.service.UserQueryService;
 import com.example.canalcache.service.UserWriteService;
@@ -39,6 +41,7 @@ class CacheManagementControllerTest {
     private final CanalCacheSyncService sync = mock(CanalCacheSyncService.class);
     private final UserQueryService queries = mock(UserQueryService.class);
     private final SimpleMeterRegistry metrics = new SimpleMeterRegistry();
+    private final DeadLetterStore deadLetters = mock(DeadLetterStore.class);
     private MockMvc mvc;
 
     @BeforeEach
@@ -51,7 +54,8 @@ class CacheManagementControllerTest {
         when(redis.opsForHash()).thenReturn(hashes);
         when(sync.getStatus()).thenReturn(new SyncStatus(true, 1, 1, null, null));
         mvc = MockMvcBuilders.standaloneSetup(
-                new CacheManagementController(processor, redis, metrics, sync, new CacheBrowseService(redis)),
+                new CacheManagementController(processor, redis, metrics, sync, new CacheBrowseService(redis),
+                        new CacheNamespacePurger(redis, new CacheBrowseService(redis)), deadLetters),
                 new UserController(queries, mock(UserWriteService.class))).build();
     }
 
@@ -59,7 +63,10 @@ class CacheManagementControllerTest {
     void overviewIsAvailableWithoutCallingRedis() throws Exception {
         metrics.counter("cache.query.items", "table", "users", "result", "hit").increment(3);
         metrics.counter("cache.query.items", "table", "users", "result", "miss").increment();
+        metrics.counter(DeadLetterStore.METRIC, "reason", "MISSING_PRIMARY_KEY").increment(2);
+        metrics.counter(DeadLetterStore.METRIC, "reason", "MALFORMED_ENTRY").increment();
         mvc.perform(get("/cache/overview")).andExpect(status().isOk())
+                .andExpect(jsonPath("$.deadLetters").value(3))
                 .andExpect(jsonPath("$.groups[0].table").value("users"))
                 .andExpect(jsonPath("$.groups[0].hitRate").value(0.75))
                 .andExpect(jsonPath("$.groups[0].nullExpireSeconds").value(30))
@@ -93,6 +100,35 @@ class CacheManagementControllerTest {
                 .andExpect(status().isOk()).andExpect(jsonPath("$.requestedKeys").value(2))
                 .andExpect(jsonPath("$.deletedKeys").value(1));
         verify(redis).delete(List.of("user:1", "user:2"));
+    }
+
+    @Test
+    void purgeRemovesOnlyRegisteredGroupEntriesAndReportsCount() throws Exception {
+        when(redis.execute(any(RedisScript.class), anyList(), any(Object[].class)))
+                .thenReturn(List.of("0", List.of("user:1", "user:stats")));
+        when(redis.unlink(List.of("user:1"))).thenReturn(1L);
+        mvc.perform(post("/cache/groups/users/purge")).andExpect(status().isOk())
+                .andExpect(jsonPath("$.table").value("users"))
+                .andExpect(jsonPath("$.deletedKeys").value(1));
+        verify(redis).unlink(List.of("user:1"));
+    }
+
+    @Test
+    void unknownGroupCannotBePurged() throws Exception {
+        mvc.perform(post("/cache/groups/other/purge")).andExpect(status().isNotFound());
+        verifyNoInteractions(redis);
+    }
+
+    @Test
+    void deadLettersAreListedWithValidatedCount() throws Exception {
+        when(deadLetters.recent(20)).thenReturn(List.of(
+                new DeadLetterStore.Entry("1-0", Map.of("reason", "MISSING_PRIMARY_KEY"))));
+        mvc.perform(get("/cache/dead-letters")).andExpect(status().isOk())
+                .andExpect(jsonPath("$[0].id").value("1-0"))
+                .andExpect(jsonPath("$[0].fields.reason").value("MISSING_PRIMARY_KEY"));
+        mvc.perform(get("/cache/dead-letters").param("count", "101")).andExpect(status().isBadRequest());
+        verify(deadLetters).recent(20);
+        verifyNoMoreInteractions(deadLetters);
     }
 
     @Test

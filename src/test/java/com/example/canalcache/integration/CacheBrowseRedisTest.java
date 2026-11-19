@@ -125,5 +125,45 @@ class CacheBrowseRedisTest {
         assertThat(queries.getById("users", 1L, User.class).getName()).isEqualTo("recovered");
     }
 
+    @Test
+    void purgeRemovesCachedAndLoadingEntriesButKeepsMetadataAndOtherGroups() {
+        for (long id = 1; id <= 30; id++) redis.opsForHash().put(own("user:" + id), "data", "null");
+        String loading = own("user:201");
+        redis.opsForHash().put(loading, "load_token", "pending");
+        String metadata = own("user:stats");
+        redis.opsForHash().put(metadata, "data", "metadata");
+        String other = own("department:1");
+        redis.opsForHash().put(other, "data", "other-group");
+
+        long deleted = new CacheNamespacePurger(redis, new CacheBrowseService(redis))
+                .purge("users", processor.getConfig("users"));
+
+        assertThat(deleted).isEqualTo(31);
+        assertThat(redis.hasKey(prefix + "user:1")).isFalse();
+        assertThat(redis.hasKey(loading)).isFalse();
+        assertThat(redis.hasKey(metadata)).isTrue();
+        assertThat(redis.hasKey(other)).isTrue();
+    }
+
+    @Test
+    void deadLettersRoundTripThroughRealStreamNewestFirst() {
+        DeadLetterStore store = new DeadLetterStore(redis, new ObjectMapper(), metrics, own("dead-letters"));
+        store.recordAll(List.of(letter("first"), letter("second")));
+
+        List<DeadLetterStore.Entry> recent = store.recent(10);
+
+        assertThat(recent).extracting(entry -> entry.fields().get("message")).containsExactly("second", "first");
+        assertThat(recent.get(0).fields()).containsEntry("reason", "MISSING_PRIMARY_KEY")
+                .containsEntry("table", "users").containsEntry("after", "{\"name\":\"x\"}")
+                .containsKey("recordedAt").doesNotContainKey("before");
+        assertThat(metrics.get(DeadLetterStore.METRIC).tag("reason", "MISSING_PRIMARY_KEY").counter().count())
+                .isEqualTo(2);
+    }
+
+    private static DeadLetterStore.DeadLetter letter(String message) {
+        return new DeadLetterStore.DeadLetter("MISSING_PRIMARY_KEY", message, "users", "UPDATE", 0, 1L,
+                "mysql-bin.000001", 100L, null, Map.of("name", "x"));
+    }
+
     private String own(String suffix) { String key = prefix + suffix; ownedKeys.add(key); return key; }
 }
